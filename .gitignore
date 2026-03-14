@@ -1,0 +1,14 @@
+*.jpg
+*.png
+*.jpeg
+
+
+*.pyc
+*./.venv
+
+*.tar
+*.zip
+*.pdf
+*.txt
+*.pth
+*.csv
