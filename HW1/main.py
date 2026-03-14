@@ -67,14 +67,14 @@ def main():
     # 2. Data Preprocessing & Loaders
     # ==============================================================================
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(384, scale=(0.4, 1.0)),
+        transforms.RandomResizedCrop(448, scale=(0.4, 1.0)),
         transforms.RandomHorizontalFlip(),
         transforms.ColorJitter(
             brightness=0.1,
             contrast=0.1,
-            saturation=0.05,
-            hue=0.02
         ),
+        transforms.RandomApply([transforms.GaussianBlur(
+            kernel_size=5, sigma=(0.1, 2.0))], p=0.3),
         transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
@@ -83,8 +83,8 @@ def main():
     ])
 
     val_transform = transforms.Compose([
-        transforms.Resize(400),
-        transforms.CenterCrop(384),
+        transforms.Resize(512),
+        transforms.CenterCrop(448),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])
@@ -109,11 +109,14 @@ def main():
     model = ImageClassificationModel(
         num_classes=NUM_CLASSES, pretrained=True).to(device)
 
-    # Freeze the first 2 layers of the backbone (conv1 and layer1), which are the most general feature extractors
-    for param in model.backbone[4].parameters():
+    # Freeze the backbone except the last two layers (Layer3 and Layer4)
+    for name, param in model.backbone.named_parameters():
         param.requires_grad = False
-    for param in model.backbone[5].parameters():
-        param.requires_grad = False
+
+    for param in model.backbone[6].parameters():  # Layer3
+        param.requires_grad = True
+    for param in model.backbone[7].parameters():  # Layer4
+        param.requires_grad = True
 
     # 3.2 Loss Function : class-balance loss
     beta = 0.999
@@ -140,10 +143,9 @@ def main():
             head_params.append(param)
 
     optimizer = optim.AdamW([
-        # Backbone
-        {'params': model.backbone.parameters(), 'lr': LR_BACKBONE},
-        # Head (Classifier)
-        {'params': model.classifier.parameters(), 'lr': LR_HEAD}
+        {'params': model.backbone[6].parameters(), 'lr': 1e-5},
+        {'params': model.backbone[7].parameters(), 'lr': 1e-5},
+        {'params': model.classifier.parameters(), 'lr': 5e-4}
     ], weight_decay=1e-4)
 
     # 3.4 Scheduler

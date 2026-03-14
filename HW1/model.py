@@ -68,7 +68,7 @@ class GeM(nn.Module):
 
 
 class ImageClassificationModel(nn.Module):
-    def __init__(self, num_classes: int = 100, pretrained: bool = True): 
+    def __init__(self, num_classes: int = 100, pretrained: bool = True):
         """Custom Model with ResNet backbone
 
         Args:
@@ -88,11 +88,15 @@ class ImageClassificationModel(nn.Module):
         self.cbam = CBAM(in_planes=2048, ratio=16, kernel_size=7)
 
         # self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.pool = GeM(p=5.0)
+        # self.pool = GeM(p=5.0)
+
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
         self.flatten = nn.Flatten()
 
         self.embedding = nn.Sequential(
-            nn.Linear(2048, 512),
+            nn.Linear(4096, 512),
             nn.BatchNorm1d(512),
             nn.PReLU(),
             nn.Dropout(p=0.5)
@@ -103,8 +107,12 @@ class ImageClassificationModel(nn.Module):
     def forward(self, x):
         x = self.backbone(x)
         x = self.cbam(x)
-        x = self.flatten(self.pool(x))
-        embeddings = self.embedding(x)
+        
+        feat_avg = self.flatten(self.avg_pool(x))
+        feat_max = self.flatten(self.max_pool(x))
+        combined_feat = torch.cat([feat_avg, feat_max], dim=1)
+        
+        embeddings = self.embedding(combined_feat)
         logits = self.classifier(embeddings)
 
         return logits
