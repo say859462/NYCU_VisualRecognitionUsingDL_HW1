@@ -49,7 +49,7 @@ def main():
     model.eval()
 
     # 3. 初始化雙重 Grad-CAM 物件 (鎖定全新的平行注意力模組)
-    cam_l3 = GradCAM(model=model, target_layers=[model.cbam_l3])
+    cam_l3 = GradCAM(model=model, target_layers=[model.se_l3]) # 這裡改成 se_l3
     cam_l4 = GradCAM(model=model, target_layers=[model.backbone_l4[-1]])
 
     # 影像前處理定義
