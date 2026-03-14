@@ -53,6 +53,18 @@ class CBAM(nn.Module):
         return x
 
 
+class ParallelCBAM(nn.Module):
+    def __init__(self, in_planes, ratio=16):
+        super(ParallelCBAM, self).__init__()
+        # fine-grained (Kernel 3)
+        self.cbam_k3 = CBAM(in_planes, ratio=ratio, kernel_size=3)
+        # coarse-grained (Kernel 7)
+        self.cbam_k7 = CBAM(in_planes, ratio=ratio, kernel_size=7)
+
+    def forward(self, x):
+        # Combine the outputs of both CBAM branches to capture both fine-grained and coarse-grained attention
+        return self.cbam_k3(x) + self.cbam_k7(x)
+
 # GeM Pooling Layer(Generalized Mean Pooling)
 # Reference: https://arxiv.org/pdf/1711.02512.pdf
 
@@ -80,56 +92,43 @@ class ImageClassificationModel(nn.Module):
         self.stage1_3 = nn.Sequential(*list(resnet.children())[:7])
         self.stage4 = nn.Sequential(*list(resnet.children())[7:8])
 
-        self.cbam_l3 = CBAM(in_planes=1024, ratio=16)
-        self.cbam_l4 = CBAM(in_planes=2048, ratio=16)
+        # Multi-attention CBAM
+        self.multi_cbam_l3 = ParallelCBAM(in_planes=1024, ratio=16)
+        self.multi_cbam_l4 = ParallelCBAM(in_planes=2048, ratio=16)
 
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        # Pooling layers
+        self.gem = GeM(p=5)
 
+        # Dimension reduction layers for each feature map before concatenation
+        self.reduce3 = nn.Linear(1024, 512, bias=False)
+        self.reduce4 = nn.Linear(2048, 512, bias=False)
 
         self.embedding = nn.Sequential(
-            nn.Linear(6144, 512),
+            nn.Linear(1024, 512),
             nn.BatchNorm1d(512),
             nn.PReLU(),
-            nn.Dropout(p=0.4)
+            nn.Dropout(p=0.5)
         )
         self.classifier = nn.Linear(512, num_classes)
-        self._init_weights()
 
     def forward(self, x):
 
-        f3 = self.stage1_3(x)  # [B, 1024, 28, 28]
-        f3 = self.cbam_l3(f3)
+        # --- Layer 3 ---
+        f3 = self.stage1_3(x)
+        f3_att = self.multi_cbam_l3(f3)
+        p3 = self.gem(f3_att).flatten(1)                  # [B, 1024]
+        p3_reduced = self.reduce3(p3)                     # [B, 512]
 
+        # --- Layer 4 ---
+        f4 = self.stage4(f3)
+        f4_att = self.multi_cbam_l4(f4)
+        p4 = self.gem(f4_att).flatten(1)                  # [B, 2048]
+        p4_reduced = self.reduce4(p4)                     # [B, 512]
 
-        p_avg_3 = self.avg_pool(f3).flatten(1)  # [B, 1024]
-        p_max_3 = self.max_pool(f3).flatten(1)  # [B, 1024]
-
-
-        f4 = self.stage4(f3)   # [B, 2048, 14, 14]
-        f4 = self.cbam_l4(f4)
-
-
-        p_avg_4 = self.avg_pool(f4).flatten(1)  # [B, 2048]
-        p_max_4 = self.max_pool(f4).flatten(1)  # [B, 2048]
-
-
-        combined = torch.cat(
-            [p_avg_3, p_max_3, p_avg_4, p_max_4], dim=1)  # [B, 6144]
-
-        embeddings = self.embedding(combined)
+        # --- Fusion ---
+        fused = torch.cat([p3_reduced, p4_reduced], dim=1)  # [B, 1024]
+        embeddings = self.embedding(fused)                 # [B, 512]
         return self.classifier(embeddings)
-
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(
-                    m.weight, mode='fan_out', nonlinearity='leaky_relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm1d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
 
     def check_parameters(self):
         # Check the total number of trainable parameters in the model

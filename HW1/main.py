@@ -73,8 +73,6 @@ def main():
             brightness=0.15,
             contrast=0.15,
         ),
-        transforms.RandomApply([transforms.GaussianBlur(
-            kernel_size=5, sigma=(0.1, 2.0))], p=0.3),
         transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
@@ -109,9 +107,9 @@ def main():
     model = ImageClassificationModel(
         num_classes=100, pretrained=True).to(device)
 
-    for param in model.stage1_3.parameters():
+    for param in model.stage1_3[:5].parameters():
         param.requires_grad = False
-    for param in model.stage1_3[6].parameters():
+    for param in model.stage1_3[5:].parameters():
         param.requires_grad = True
     for param in model.stage4.parameters():
         param.requires_grad = True
@@ -129,7 +127,7 @@ def main():
 
     class_weights = torch.FloatTensor(cb_weights).to(device)
     criterion = ClassBalancedFocalLoss(
-        cb_weights=class_weights, gamma=1.5, label_smoothing=0.1)
+        cb_weights=class_weights, gamma=2.0, label_smoothing=0.1)
 
     # 3.3 Optimizer (Layer-wise LR)
     backbone_params = []
@@ -141,8 +139,17 @@ def main():
             head_params.append(param)
 
     optimizer = optim.AdamW([
-        {'params': model.stage1_3[6].parameters(), 'lr': LR_BACKBONE},
+        # --- Backbone Params---
+        {'params': model.stage1_3[5:].parameters(), 'lr': LR_BACKBONE},
         {'params': model.stage4.parameters(), 'lr': LR_BACKBONE},
+
+        # --- Head & Attention Params ---
+
+        {'params': model.multi_cbam_l3.parameters(), 'lr': LR_HEAD},
+        {'params': model.multi_cbam_l4.parameters(), 'lr': LR_HEAD},
+        {'params': model.gem.parameters(), 'lr': LR_HEAD},
+        {'params': model.reduce3.parameters(), 'lr': LR_HEAD},
+        {'params': model.reduce4.parameters(), 'lr': LR_HEAD},
         {'params': model.embedding.parameters(), 'lr': LR_HEAD},
         {'params': model.classifier.parameters(), 'lr': LR_HEAD}
     ], weight_decay=1e-4)
