@@ -28,7 +28,7 @@ def main():
     BATCH_SIZE = config['batch_size']
     NUM_CLASSES = config['num_classes']
     DATA_DIR = config['data_dir']
-    BEST_MODEL_PATH = './Model_Weight/best_model.pth'
+    BEST_MODEL_PATH = './Model_Weight/13th/best_model.pth'
     OUTPUT_CSV = "prediction.csv"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -85,57 +85,74 @@ class ImageClassificationModel(nn.Module):
 
         # Backbone model : ResNet
         resnet = models.resnet152(
-            weights=models.ResNet152_Weights.DEFAULT if pretrained else None,
-            replace_stride_with_dilation=[False, False, True]
+            weights=models.ResNet152_Weights.DEFAULT if pretrained else None
         )
 
-        self.stage1_3 = nn.Sequential(*list(resnet.children())[:7])
-        self.stage4 = nn.Sequential(*list(resnet.children())[7:8])
+        self.backbone_l1_l3 = nn.Sequential(*list(resnet.children())[:7])
+        self.backbone_l4 = nn.Sequential(*list(resnet.children())[7:8])
 
-        # Multi-attention CBAM
-        self.multi_cbam_l3 = ParallelCBAM(in_planes=1024, ratio=16)
-        self.multi_cbam_l4 = ParallelCBAM(in_planes=2048, ratio=16)
+        # Layer 3 CBAM
+        self.cbam_l3 = CBAM(in_planes=1024, ratio=16, kernel_size=7)
 
-        # Pooling layers
+        self.reduce3 = nn.Conv2d(1024, 512, kernel_size=1, bias=False)
+        self.reduce4 = nn.Conv2d(2048, 512, kernel_size=1, bias=False)
+
         self.gem = GeM(p=5)
 
-        # Dimension reduction layers for each feature map before concatenation
-        self.reduce3 = nn.Linear(1024, 512, bias=False)
-        self.reduce4 = nn.Linear(2048, 512, bias=False)
-
         self.embedding = nn.Sequential(
-            nn.Linear(1024, 512),
+            nn.Linear(1024, 768),
+            nn.BatchNorm1d(768),
+            nn.PReLU(),
+            nn.Dropout(p=0.5),
+
+            nn.Linear(768, 512),
             nn.BatchNorm1d(512),
             nn.PReLU(),
             nn.Dropout(p=0.5)
         )
         self.classifier = nn.Linear(512, num_classes)
+        self._init_weights()
 
     def forward(self, x):
 
-        # --- Layer 3 ---
-        f3 = self.stage1_3(x)
-        f3_att = self.multi_cbam_l3(f3)
-        p3 = self.gem(f3_att).flatten(1)                  # [B, 1024]
-        p3_reduced = self.reduce3(p3)                     # [B, 512]
+        # --- Layer 3 Processing ---
+        f3 = self.backbone_l1_l3(x)                        # [B, 1024, 28, 28]
+        f3_att = self.cbam_l3(f3)
+        f3_reduced = self.reduce3(f3_att)                  # 1x1 Conv
+        p3 = self.gem(f3_reduced).flatten(1)
 
-        # --- Layer 4 ---
-        f4 = self.stage4(f3)
-        f4_att = self.multi_cbam_l4(f4)
-        p4 = self.gem(f4_att).flatten(1)                  # [B, 2048]
-        p4_reduced = self.reduce4(p4)                     # [B, 512]
+        # --- Layer 4 Processing ---
+        f4 = self.backbone_l4(f3)                          # [B, 2048, 14, 14]
+        f4_reduced = self.reduce4(f4)
+        p4 = self.gem(f4_reduced).flatten(1)
 
-        # --- Fusion ---
-        fused = torch.cat([p3_reduced, p4_reduced], dim=1)  # [B, 1024]
+        # --- Progressive Fusion ---
+        fused = torch.cat([p3, p4], dim=1)                 # [B, 1024]
         embeddings = self.embedding(fused)                 # [B, 512]
         return self.classifier(embeddings)
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(
+                    m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(
+                    m.weight, mode='fan_out', nonlinearity='leaky_relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm1d) or isinstance(m, nn.BatchNorm2d):
+                if m.weight is not None:
+                    nn.init.constant_(m.weight, 1)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
     def check_parameters(self):
         # Check the total number of trainable parameters in the model
 
         total_params = sum(p.numel()
                            for p in self.parameters())
-        print(f"Total trainable parameters: {total_params:,}")
+        print(f"Total parameters: {total_params:,}")
 
         if total_params < 100_000_000:
             print("Model size is within the 100M limit.")

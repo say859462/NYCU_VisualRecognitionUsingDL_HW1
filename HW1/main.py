@@ -67,17 +67,19 @@ def main():
     # 2. Data Preprocessing & Loaders
     # ==============================================================================
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(448, scale=(0.6, 1.0)),
+        transforms.RandomResizedCrop(448, scale=(0.75, 1.0)),
         transforms.RandomHorizontalFlip(),
         transforms.ColorJitter(
-            brightness=0.15,
-            contrast=0.15,
+            brightness=0.1,
+            contrast=0.1,
         ),
+        transforms.RandomRotation(20),
+        transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
         transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225]),
-        transforms.RandomErasing(p=0.3, scale=(0.01, 0.08), ratio=(0.3, 3.3))
+        transforms.RandomErasing(p=0.25, scale=(0.02, 0.2))
     ])
 
     val_transform = transforms.Compose([
@@ -107,11 +109,11 @@ def main():
     model = ImageClassificationModel(
         num_classes=100, pretrained=True).to(device)
 
-    for param in model.stage1_3[:5].parameters():
+    for param in model.backbone_l1_l3[:5].parameters():
         param.requires_grad = False
-    for param in model.stage1_3[5:].parameters():
+    for param in model.backbone_l1_l3[5:].parameters():
         param.requires_grad = True
-    for param in model.stage4.parameters():
+    for param in model.backbone_l4.parameters():
         param.requires_grad = True
 
     # 3.2 Loss Function : class-balance loss
@@ -140,19 +142,17 @@ def main():
 
     optimizer = optim.AdamW([
         # --- Backbone Params---
-        {'params': model.stage1_3[5:].parameters(), 'lr': LR_BACKBONE},
-        {'params': model.stage4.parameters(), 'lr': LR_BACKBONE},
+        {'params': model.backbone_l1_l3[5:].parameters(), 'lr': LR_BACKBONE},
+        {'params': model.backbone_l4.parameters(), 'lr': LR_BACKBONE},
 
         # --- Head & Attention Params ---
-
-        {'params': model.multi_cbam_l3.parameters(), 'lr': LR_HEAD},
-        {'params': model.multi_cbam_l4.parameters(), 'lr': LR_HEAD},
+        {'params': model.cbam_l3.parameters(), 'lr': LR_HEAD},
         {'params': model.gem.parameters(), 'lr': LR_HEAD},
         {'params': model.reduce3.parameters(), 'lr': LR_HEAD},
         {'params': model.reduce4.parameters(), 'lr': LR_HEAD},
         {'params': model.embedding.parameters(), 'lr': LR_HEAD},
         {'params': model.classifier.parameters(), 'lr': LR_HEAD}
-    ], weight_decay=1e-4)
+    ], weight_decay=3e-4)
 
     # 3.4 Scheduler
     from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR

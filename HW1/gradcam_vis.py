@@ -24,11 +24,11 @@ def main():
     parser.add_argument('--num_samples_per_class', type=int, default=3,
                         help='Number of images to randomly sample per class')
     parser.add_argument('--model_path', type=str,
-                        default='./Model_Weight/13th/best_model.pth', help='Path to model weight')
+                        default='./Model_Weight/best_model.pth', help='Path to model weight')
     parser.add_argument('--num_classes', type=int,
                         default=100, help='Number of classes')
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/GradCAM_Outputs/13th_Dual', help='Directory to save heatmaps')
+                        default='./Plot/GradCAM_Outputs/13th', help='Directory to save heatmaps')
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -49,8 +49,8 @@ def main():
     model.eval()
 
     # 3. 初始化雙重 Grad-CAM 物件 (鎖定全新的平行注意力模組)
-    cam_l3 = GradCAM(model=model, target_layers=[model.multi_cbam_l3])
-    cam_l4 = GradCAM(model=model, target_layers=[model.multi_cbam_l4])
+    cam_l3 = GradCAM(model=model, target_layers=[model.cbam_l3])
+    cam_l4 = GradCAM(model=model, target_layers=[model.backbone_l4[-1]])
 
     # 影像前處理定義
     preprocess_geo = transforms.Compose([
