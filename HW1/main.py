@@ -96,10 +96,10 @@ def main():
         root_dir=DATA_DIR, split="val", transform=val_transform)
 
     train_loader = DataLoader(
-        train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True
+        train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=8, pin_memory=True
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True
+        val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=True
     )
 
     # ==============================================================================
