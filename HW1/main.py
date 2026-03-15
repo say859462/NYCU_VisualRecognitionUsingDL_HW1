@@ -159,7 +159,7 @@ def main():
 
     class_weights = torch.FloatTensor(cb_weights).to(device)
     criterion = ClassBalancedFocalLoss(
-        cb_weights=class_weights, gamma=2.0, label_smoothing=0.0)
+        cb_weights=class_weights, gamma=2.0, label_smoothing=0.03)
 
     # 3.3 Optimizer (Layer-wise LR)
     backbone_params = []
