@@ -1,4 +1,4 @@
-from utils import plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, ClassBalancedFocalLoss
+from utils import plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, ClassBalancedFocalLoss, RandomDiscreteRotation
 from val import validate_one_epoch
 from train import train_one_epoch
 from model import ImageClassificationModel
@@ -70,7 +70,7 @@ def main():
     train_transform = transforms.Compose([
         transforms.RandomResizedCrop(448, scale=(0.5, 1.0)),
         transforms.RandomHorizontalFlip(p=0.5),
-        transforms.Lambda(lambda img: TF.rotate(img, random.choices([0, 90, 270], weights=[0.7, 0.15, 0.15])[0])),
+        RandomDiscreteRotation(angles=[0, 90, 270], weights=[0.7, 0.15, 0.15]),
         transforms.ColorJitter(
             brightness=0.1,
             contrast=0.1,
@@ -129,7 +129,7 @@ def main():
 
     class_weights = torch.FloatTensor(cb_weights).to(device)
     criterion = ClassBalancedFocalLoss(
-        cb_weights=class_weights, gamma=2.0, label_smoothing=0.0) # label_smoothing=0.0
+        cb_weights=class_weights, gamma=2.0, label_smoothing=0.0)  # label_smoothing=0.0
 
     # 3.3 Optimizer (Layer-wise LR)
     backbone_params = []
