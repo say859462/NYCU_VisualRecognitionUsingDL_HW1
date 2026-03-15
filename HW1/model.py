@@ -147,7 +147,7 @@ class ImageClassificationModel(nn.Module):
         # --- Layer 3 Processing ---
         self.se_l3 = SEBlock(in_channels=1024, reduction=16)
         self.reduce3 = nn.Conv2d(1024, 512, kernel_size=1, bias=False)
-        self.gem = GeM(p=4)
+        self.gem = GeM(p=3)
 
         # --- Layer 4 Processing ---
         self.output_dim = 4096

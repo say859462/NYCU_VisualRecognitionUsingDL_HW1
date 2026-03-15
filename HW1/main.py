@@ -152,7 +152,7 @@ def main():
         {'params': model.fc_cbp.parameters(), 'lr': LR_HEAD},
         {'params': model.embedding.parameters(), 'lr': LR_HEAD},
         {'params': model.classifier.parameters(), 'lr': LR_HEAD}
-    ], weight_decay=2e-4)
+    ], weight_decay=3e-4)
 
     # 3.4 Scheduler
     from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
