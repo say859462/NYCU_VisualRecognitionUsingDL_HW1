@@ -8,12 +8,13 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import transforms
+import torchvision.transforms.functional as TF
 import os
 import argparse
 import json
 import time
 import numpy as np
-
+import random
 # ==============================================================================
 # 0. Hardware Optimization
 # ==============================================================================
@@ -67,14 +68,13 @@ def main():
     # 2. Data Preprocessing & Loaders
     # ==============================================================================
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(576, scale=(0.3, 1.0)),
-        transforms.RandomHorizontalFlip(),
+        transforms.RandomResizedCrop(448, scale=(0.5, 1.0)),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.Lambda(lambda img: TF.rotate(img, random.choices([0, 90, 270], weights=[0.7, 0.15, 0.15])[0])),
         transforms.ColorJitter(
             brightness=0.1,
             contrast=0.1,
         ),
-        transforms.RandomRotation(45),
-        transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
         transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
@@ -83,8 +83,8 @@ def main():
     ])
 
     val_transform = transforms.Compose([
-        transforms.Resize(640),
-        transforms.CenterCrop(576),
+        transforms.Resize(512),
+        transforms.CenterCrop(448),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])
@@ -129,7 +129,7 @@ def main():
 
     class_weights = torch.FloatTensor(cb_weights).to(device)
     criterion = ClassBalancedFocalLoss(
-        cb_weights=class_weights, gamma=2.0, label_smoothing=0.1)
+        cb_weights=class_weights, gamma=2.0, label_smoothing=0.0) # label_smoothing=0.0
 
     # 3.3 Optimizer (Layer-wise LR)
     backbone_params = []

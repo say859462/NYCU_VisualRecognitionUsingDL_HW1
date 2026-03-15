@@ -3,7 +3,6 @@ import os
 import pandas as pd
 import argparse
 import json
-from utils import ProcessCrops
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from tqdm import tqdm
@@ -28,17 +27,16 @@ def main():
     BATCH_SIZE = config['batch_size']
     NUM_CLASSES = config['num_classes']
     DATA_DIR = config['data_dir']
-    BEST_MODEL_PATH = './Model_Weight/best_model.pth'
+    BEST_MODEL_PATH = './Model_Weight/15th/best_model.pth'
     OUTPUT_CSV = "prediction.csv"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
     # Test Dataset and DataLoader
-
     test_transform = transforms.Compose([
-        transforms.Resize(640),
-        transforms.CenterCrop(576),
+        transforms.Resize(512),
+        transforms.CenterCrop(448),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])
@@ -64,18 +62,24 @@ def main():
     model.eval()
     all_predictions = []
 
-    print("Predicting on test dataset...")
+    print("Predicting on test dataset with Safe TTA (Horizontal Flip Only)...")
 
     with torch.no_grad():
-        for images, _ in tqdm(test_loader, desc="Predicting"):
-            # images shape: [Batch_Size, 10, 3, H, W]
+        for images, _ in tqdm(test_loader, desc="Predicting", colour="green"):
             images = images.to(device)
-            # Multi-crop inference
 
-            outputs = model(images)
+            # 取得 Logits
+            outputs_orig = model(images)
+            outputs_flipped = model(torch.flip(images, dims=[3]))
 
-            _, preds = torch.max(outputs, 1)
+            # [關鍵修正]：轉成機率空間再做平均
+            prob_orig = torch.nn.functional.softmax(outputs_orig, dim=1)
+            prob_flipped = torch.nn.functional.softmax(outputs_flipped, dim=1)
 
+            # 機率融合
+            probs = (prob_orig + prob_flipped) / 2.0
+
+            _, preds = torch.max(probs, 1)
             all_predictions.extend(preds.cpu().numpy())
 
     # Generate submission CSV

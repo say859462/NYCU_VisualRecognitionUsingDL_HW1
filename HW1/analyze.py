@@ -3,11 +3,12 @@ import os
 import numpy as np
 from torch.utils.data import DataLoader
 from torchvision import transforms
+import torchvision.transforms.functional as TF  # <--- 加入 Tensor 旋轉模組
+from tqdm import tqdm
 
 from dataset import ImageDataset
 from model import ImageClassificationModel
 
-from val import validate_one_epoch
 from utils import (
     plot_class_distribution,
     plot_per_class_error,
@@ -20,17 +21,20 @@ from utils import (
 def main():
     # Parameters
     DATA_DIR = "./Dataset/data"
-    MODEL_PATH = "./Model_Weight/14th/best_model.pth"  # model weight
+    MODEL_PATH = "./Model_Weight/15th/best_model.pth"
     NUM_CLASSES = 100
-    BATCH_SIZE = 32
-    PLOT_SAVE_DIR = "./Plot/14th"
+    BATCH_SIZE = 16
+    PLOT_SAVE_DIR = "./Plot/15th/Flip_Safe_TTA_Analysis"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
+    # ==========================================
+    # 回復為原始的推斷畫布大小 (576x576)
+    # ==========================================
     val_transform = transforms.Compose([
-        transforms.Resize(640),
-        transforms.CenterCrop(576),
+        transforms.Resize(512),
+        transforms.CenterCrop(448),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])
@@ -38,6 +42,7 @@ def main():
 
     val_dataset = ImageDataset(
         root_dir=DATA_DIR, split="val", transform=val_transform)
+
     val_loader = DataLoader(
         val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
 
@@ -53,7 +58,7 @@ def main():
     class_sample_count = np.bincount(train_labels, minlength=NUM_CLASSES)
 
     effective_num = 1.0 - np.power(beta, class_sample_count)
-    effective_num = np.maximum(effective_num, 1e-8)  # avoid division by zero
+    effective_num = np.maximum(effective_num, 1e-8)
     cb_weights = (1.0 - beta) / np.array(effective_num)
     cb_weights = cb_weights / np.sum(cb_weights) * NUM_CLASSES
 
@@ -65,19 +70,57 @@ def main():
         model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
         print(f"Load the model from : {MODEL_PATH}")
     else:
-        print(
-            f"Error: Couldn't find the model weight at {MODEL_PATH}. Please ensure the path is correct and the file exists.")
+        print(f"Error: Couldn't find the model weight at {MODEL_PATH}.")
         return
 
-    print("\nValidating the best model on validation set to get predictions and targets for analysis...")
+    print("\nValidating the best model on validation set with 4-Crop Rotational TTA...")
 
-    val_loss, val_acc, all_preds, all_labels = validate_one_epoch(
-        model, val_loader, criterion, device
-    )
+    # ==========================================
+    # 專屬 4-Crop 旋轉 TTA 驗證迴圈
+    # ==========================================
+    model.eval()
+    running_loss = 0.0
+    correct_preds = 0
+    total_preds = 0
+    all_preds = []
+    all_labels = []
+
+    with torch.no_grad():
+        for images, labels in tqdm(val_loader, desc="4-Crop Rotational TTA Validating", colour="cyan"):
+            images, labels = images.to(device), labels.to(device)
+
+            # 1. 視角 A：原圖預測
+            outputs_orig = model(images)
+
+            # 2. 視角 B：水平鏡像預測
+            images_flipped = torch.flip(images, dims=[3])
+            outputs_flipped = model(images_flipped)
+
+            # =========================================================
+            # 機率融合 (Average Ensembling)
+            # =========================================================
+            outputs = (outputs_orig + outputs_flipped) / 2.0
+
+            loss = criterion(outputs, labels)
+
+            # 計算 Loss 時維持 batch_size 比例
+            running_loss += loss.item() * images.size(0)
+
+            _, preds = torch.max(outputs, 1)
+
+            correct_preds += torch.sum(preds == labels.data).item()
+            total_preds += images.size(0)
+
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    val_loss = running_loss / total_preds
+    val_acc = (correct_preds / total_preds) * 100
+    # ==========================================
 
     print("\n" + "="*50)
     print(
-        f"🎉 [High-Res Inference Result] Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
+        f"🎉 [Rotational TTA Inference Result] Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
     print("="*50 + "\n")
 
     print("\nGenerating analysis plots...")
@@ -101,7 +144,6 @@ def main():
     )
     print(f"Long-tail accuracy plot saved to {long_tail_save_path}")
 
-    # Correlation analysis between training sample count and error rates
     if train_counts and error_rates:
         corr_save_path = os.path.join(
             PLOT_SAVE_DIR, "correlation_analysis.png")

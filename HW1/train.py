@@ -3,7 +3,7 @@ from tqdm import tqdm
 import numpy as np
 
 
-def train_one_epoch(model, train_loader, criterion, optimizer, device, scaler):
+def train_one_epoch(model, train_loader, criterion, optimizer, device, scaler, max_grad_norm=5.0):
     model.train()
     running_loss = 0.0
     correct_preds = 0
@@ -28,6 +28,8 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, scaler):
             loss = criterion(outputs, labels)
 
         scaler.scale(loss).backward()
+        scaler.unscale_(optimizer) 
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
         scaler.step(optimizer)
         scaler.update()
 
