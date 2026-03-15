@@ -6,8 +6,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 from scipy.stats import pearsonr
 from torchvision import transforms
+import random
+import torchvision.transforms.functional as TF
+
+# Custom utilities for training, analysis, and visualization
+class RandomDiscreteRotation:
+
+    def __init__(self, angles=[0, 90, 270], weights=[0.7, 0.15, 0.15]):
+        self.angles = angles
+        self.weights = weights
+
+    def __call__(self, img):
+        angle = random.choices(self.angles, weights=self.weights)[0]
+        return TF.rotate(img, angle)
 
 
+# Custom loss function for class-balanced focal loss
 class ClassBalancedFocalLoss(nn.Module):
     def __init__(self, cb_weights, gamma=2.0, label_smoothing=0.0):
         super().__init__()
