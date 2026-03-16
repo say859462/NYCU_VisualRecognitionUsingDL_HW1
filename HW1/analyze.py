@@ -25,8 +25,11 @@ def main():
                         help='TTA mode: none, flip (Horizontal), rotational (4-Crop)')
     parser.add_argument('--model_path', type=str, default='./Model_Weight/best_model.pth',
                         help='Path to the model weights')
-    parser.add_argument('--config_name', type=str, default='18th',
+    
+
+    parser.add_argument('--config_name', type=str, default='19th',
                         help='Name for the output directory')
+                        
     parser.add_argument('--img_size', type=int, default=512,
                         help='Crop size for inference')
     args = parser.parse_args()
@@ -84,28 +87,26 @@ def main():
 
             # --- TTA 核心邏輯 ---
             if args.tta == 'none':
-                outputs = model(images)
+                outputs = model(images) * 25.0  
                 probs = torch.softmax(outputs, dim=1)
 
             elif args.tta == 'flip':
-                out_orig = model(images)
-                out_flip = model(torch.flip(images, dims=[3]))
-                probs = (torch.softmax(out_orig, dim=1) +
+                outputs = model(images) * 25.0 
+                out_flip = model(torch.flip(images, dims=[3])) * 25.0
+                probs = (torch.softmax(outputs, dim=1) +
                          torch.softmax(out_flip, dim=1)) / 2.0
 
             elif args.tta == 'rotational':
-                out_orig = model(images)
-                out_flip = model(torch.flip(images, dims=[3]))
-                out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3]))
-                out_rot270 = model(torch.rot90(images, k=3, dims=[2, 3]))
+                outputs = model(images) * 25.0 
+                out_flip = model(torch.flip(images, dims=[3])) * 25.0
+                out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3])) * 25.0
+                out_rot270 = model(torch.rot90(images, k=3, dims=[2, 3])) * 25.0
 
-                probs = (torch.softmax(out_orig, dim=1) +
+                probs = (torch.softmax(outputs, dim=1) +
                          torch.softmax(out_flip, dim=1) +
                          torch.softmax(out_rot90, dim=1) +
                          torch.softmax(out_rot270, dim=1)) / 4.0
 
-            # 使用融合後的機率計算 Loss 與預測
-            # 注意：CrossEntropy 通常接受 Logits，這裡為了分析方便使用 Log 機率
             loss = criterion(outputs, labels)
             running_loss += loss.item() * images.size(0)
 
@@ -120,7 +121,7 @@ def main():
     val_acc = (correct_preds / total_preds) * 100
 
     print(
-        f"\n🎉 [{args.tta.upper()} TTA Result] Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
+        f"\n [{args.tta.upper()} TTA Result] Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
 
     # --- 繪圖分析 ---
     train_path = os.path.join(DATA_DIR, "train")

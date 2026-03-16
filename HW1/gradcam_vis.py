@@ -102,8 +102,10 @@ def main():
                 # 取得預測結果
                 with torch.no_grad():
                     outputs = model(input_tensor)
-                    probabilities = torch.nn.functional.softmax(outputs, dim=1)[
-                        0]
+                    
+                    scaled_outputs = outputs * 25.0 
+                    
+                    probabilities = torch.nn.functional.softmax(scaled_outputs, dim=1)[0]
                     pred_class = probabilities.argmax().item()
                     pred_score = probabilities[pred_class].item()
 

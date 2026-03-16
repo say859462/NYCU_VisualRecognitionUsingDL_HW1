@@ -46,8 +46,8 @@ def get_optimizer(model, lr_base=1e-4, weight_decay=3e-4):
     ) if p.requires_grad and id(p) not in allocated_params]
 
     param_groups = [
-        {'params': backbone_l1_l3_params, 'lr': lr_base * 0.1},  # Index 0
-        {'params': backbone_l4_params, 'lr': lr_base},          # Index 1
+        {'params': backbone_l1_l3_params, 'lr': lr_base * 0.01},  # Index 0
+        {'params': backbone_l4_params, 'lr': lr_base * 0.1},          # Index 1
         {'params': head_params, 'lr': lr_base * 5}              # Index 2
     ]
 
@@ -111,7 +111,7 @@ def main():
         ),
         transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5),
         transforms.ToTensor(),
-        transforms.RandomErasing(p=0.2, scale=(0.02, 0.12)),
+        transforms.RandomErasing(p=0.15, scale=(0.02, 0.08)),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225]),
 
@@ -177,8 +177,8 @@ def main():
         s=25.0
     ).to(device)
 
-    # 設定 DRW 啟動的 Epoch (通常設在總 Epoch 的 80% 處)
-    drw_epoch = int(NUM_EPOCHS * 0.6)
+    # 設定 DRW 啟動的 Epoch 
+    drw_epoch = int(NUM_EPOCHS * 0.5)
 
     # 3.3 Optimizer (Layer-wise LR)
     optimizer = get_optimizer(model, lr_base=LR_BASE, weight_decay=3e-4)
@@ -215,6 +215,7 @@ def main():
     start_epoch = 0
     best_val_acc = 0.0
     best_val_loss = float('inf')
+    best_drw_acc = 0.0
     epochs_no_improve = 0
     history = {'train_loss': [], 'val_loss': [],
                'train_acc': [], 'val_acc': []}
@@ -240,6 +241,7 @@ def main():
         epochs_no_improve = checkpoint.get('epochs_no_improve', 0)
         best_val_preds = checkpoint.get('best_val_preds', [])
         best_val_labels = checkpoint.get('best_val_labels', [])
+        best_drw_acc = checkpoint.get('best_drw_acc', 0.0)
         print(
             f" Successfully loaded checkpoint! Resuming from Epoch {start_epoch+1}.")
     else:
@@ -254,7 +256,7 @@ def main():
             print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")
 
             if epoch >= drw_epoch and criterion.weight is None:
-                print(f"🔥 [DRW Activated] activated (Class Re-Weighting)!")
+                print(f" [DRW Activated] activated (Class Re-Weighting)!")
                 criterion.weight = class_weights
 
             # 5.1 Train & Validate
@@ -280,6 +282,13 @@ def main():
                 f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
             print(f"Val Loss:   {val_loss:.4f} | Val Acc:   {val_acc:.2f}%")
 
+            
+            if epoch >= drw_epoch:
+                if val_acc > best_drw_acc:
+                    best_drw_acc = val_acc
+                    torch.save(model.state_dict(), './Model_Weight/best_drw_model.pth')
+                    print(f" Found better DRW model: {val_acc:.2f}%")
+
             # 5.5 Early Stopping & Model Saving Logic
             if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss):
                 best_val_acc = val_acc
@@ -302,6 +311,7 @@ def main():
                 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_acc': best_val_acc,
                 'best_val_loss': best_val_loss,
+                'best_drw_acc': best_drw_acc,
                 'history': history,
                 'epochs_no_improve': epochs_no_improve,
                 'best_val_preds': best_val_preds,

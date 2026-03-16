@@ -161,7 +161,7 @@ class ImageClassificationModel(nn.Module):
             nn.BatchNorm2d(512),
             nn.ReLU(inplace=True)
         )
-        self.gem = GeM(p=3.5)
+        self.gem = GeM(p=3.3)
 
         # --- Layer 4 Processing ---
         self.output_dim = 4096
@@ -172,14 +172,14 @@ class ImageClassificationModel(nn.Module):
             nn.Linear(4096, 512),
             nn.BatchNorm1d(512),
             nn.PReLU(),
-            nn.Dropout(p=0.4)
+            nn.Dropout(p=0.5)
         )
 
         self.embedding = nn.Sequential(
             nn.Linear(1024, 512),  # Layer3(512) + Layer4_CBP(512)
             nn.BatchNorm1d(512),
             nn.PReLU(),
-            nn.Dropout(p=0.4)
+            nn.Dropout(p=0.5)
         )
         
         self.classifier = NormedLinear(512, num_classes)
