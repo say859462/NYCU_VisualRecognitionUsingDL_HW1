@@ -46,8 +46,8 @@ def get_optimizer(model, lr_base=1e-4, weight_decay=3e-4):
     ) if p.requires_grad and id(p) not in allocated_params]
 
     param_groups = [
-        {'params': backbone_l1_l3_params, 'lr': lr_base * 0.01},  # Index 0
-        {'params': backbone_l4_params, 'lr': lr_base * 0.1},          # Index 1
+        {'params': backbone_l1_l3_params, 'lr': lr_base * 0.1},  # Index 0
+        {'params': backbone_l4_params, 'lr': lr_base * 0.5},          # Index 1
         {'params': head_params, 'lr': lr_base * 5}              # Index 2
     ]
 
@@ -259,9 +259,13 @@ def main():
                 print(f" [DRW Activated] activated (Class Re-Weighting)!")
                 criterion.weight = class_weights
 
+            enable_crop = (epoch >= drw_epoch)
+            if enable_crop and epoch == drw_epoch:
+                print(f" [Attention Crop] activated!")
+            
             # 5.1 Train & Validate
             train_loss, train_acc = train_one_epoch(
-                model, train_loader, criterion, optimizer, device, scaler)
+                model, train_loader, criterion, optimizer, device, scaler, use_crop=enable_crop)
             val_loss, val_acc, val_preds, val_labels = validate_one_epoch(
                 model, val_loader, criterion, device)
 

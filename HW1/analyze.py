@@ -25,11 +25,10 @@ def main():
                         help='TTA mode: none, flip (Horizontal), rotational (4-Crop)')
     parser.add_argument('--model_path', type=str, default='./Model_Weight/best_model.pth',
                         help='Path to the model weights')
-    
 
-    parser.add_argument('--config_name', type=str, default='19th',
+    parser.add_argument('--config_name', type=str, default='20th',
                         help='Name for the output directory')
-                        
+
     parser.add_argument('--img_size', type=int, default=512,
                         help='Crop size for inference')
     args = parser.parse_args()
@@ -87,20 +86,21 @@ def main():
 
             # --- TTA 核心邏輯 ---
             if args.tta == 'none':
-                outputs = model(images) * 20.0  
+                outputs = model(images) * 20.0
                 probs = torch.softmax(outputs, dim=1)
 
             elif args.tta == 'flip':
-                outputs = model(images) * 20.0 
+                outputs = model(images) * 20.0
                 out_flip = model(torch.flip(images, dims=[3])) * 20.0
                 probs = (torch.softmax(outputs, dim=1) +
                          torch.softmax(out_flip, dim=1)) / 2.0
 
             elif args.tta == 'rotational':
-                outputs = model(images) * 20.0 
+                outputs = model(images) * 20.0
                 out_flip = model(torch.flip(images, dims=[3])) * 20.0
                 out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3])) * 20.0
-                out_rot270 = model(torch.rot90(images, k=3, dims=[2, 3])) * 20.0
+                out_rot270 = model(torch.rot90(
+                    images, k=3, dims=[2, 3])) * 20.0
 
                 probs = (torch.softmax(outputs, dim=1) +
                          torch.softmax(out_flip, dim=1) +

@@ -32,7 +32,7 @@ def main():
                         default=100, help='Number of classes')
 
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/GradCAM_Outputs/19th', help='Directory to save heatmaps')
+                        default='./Plot/GradCAM_Outputs/20th', help='Directory to save heatmaps')
 
     args = parser.parse_args()
 
@@ -102,10 +102,11 @@ def main():
                 # 取得預測結果
                 with torch.no_grad():
                     outputs = model(input_tensor)
-                    
-                    scaled_outputs = outputs * 20.0 
-                    
-                    probabilities = torch.nn.functional.softmax(scaled_outputs, dim=1)[0]
+
+                    scaled_outputs = outputs * 20.0
+
+                    probabilities = torch.nn.functional.softmax(
+                        scaled_outputs, dim=1)[0]
                     pred_class = probabilities.argmax().item()
                     pred_score = probabilities[pred_class].item()
 

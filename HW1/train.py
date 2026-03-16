@@ -1,9 +1,9 @@
 import torch
 from tqdm import tqdm
 import numpy as np
+from utils import get_attention_crops
 
-
-def train_one_epoch(model, train_loader, criterion, optimizer, device, scaler, max_grad_norm=2.0):
+def train_one_epoch(model, train_loader, criterion, optimizer, device, scaler, max_grad_norm=2.0,use_crop=False):
     model.train()
     running_loss = 0.0
     correct_preds = 0
@@ -24,8 +24,25 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, scaler, m
 
         # Original normal Forward Pass and Loss calculation
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-            outputs = model(images)
-            loss = criterion(outputs, labels)
+            if use_crop:
+                # 階段 1：全域圖 Pass，取得注意力權重
+                outputs, attn_maps = model(images, return_attn=True)
+                loss_full = criterion(outputs, labels)
+
+                # 階段 2：生成裁切圖 (無需計算梯度)
+                with torch.no_grad():
+                    cropped_imgs = get_attention_crops(
+                        images, attn_maps, threshold=0.6)
+
+                # 階段 3：局部特徵圖 Pass
+                logits_crop = model(cropped_imgs)
+                loss_crop = criterion(logits_crop, labels)
+
+                # 聯合損失計算
+                loss = (loss_full + loss_crop) / 2.0
+            else:
+                outputs = model(images)
+                loss = criterion(outputs, labels)
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
