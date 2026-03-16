@@ -104,7 +104,7 @@ def main():
     train_transform = transforms.Compose([
         transforms.RandomResizedCrop(512, scale=(0.3, 1.0)),
         transforms.RandomHorizontalFlip(p=0.5),
-        RandomDiscreteRotation(angles=[0, 90, 270], weights=[0.7, 0.15, 0.15]),
+        transforms.RandomRotation(degrees=15),
         transforms.ColorJitter(
             brightness=0.1,
             contrast=0.1,

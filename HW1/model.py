@@ -22,11 +22,9 @@ class ChannelAttention(nn.Module):
         out = avg_out + max_out
         return self.sigmoid(out)
 
+# CBAM 的 Spatial Attention 模組改為 Residual Spatial Attention (RSA)，以擴大感受野，解決手電筒效應
 class ResidualSpatialAttention(nn.Module):
-    """
-    Exp 21: 修正版空間注意力 (RSA)
-    採用 x * (1 + attn) 結構，確保基礎資訊流不被切斷，防止空間坍塌。
-    """
+
     def __init__(self, kernel_size=7):
         super(ResidualSpatialAttention, self).__init__()
         assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
