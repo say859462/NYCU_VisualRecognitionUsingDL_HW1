@@ -87,20 +87,20 @@ def main():
 
             # --- TTA 核心邏輯 ---
             if args.tta == 'none':
-                outputs = model(images) * 25.0  
+                outputs = model(images) * 20.0  
                 probs = torch.softmax(outputs, dim=1)
 
             elif args.tta == 'flip':
-                outputs = model(images) * 25.0 
-                out_flip = model(torch.flip(images, dims=[3])) * 25.0
+                outputs = model(images) * 20.0 
+                out_flip = model(torch.flip(images, dims=[3])) * 20.0
                 probs = (torch.softmax(outputs, dim=1) +
                          torch.softmax(out_flip, dim=1)) / 2.0
 
             elif args.tta == 'rotational':
-                outputs = model(images) * 25.0 
-                out_flip = model(torch.flip(images, dims=[3])) * 25.0
-                out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3])) * 25.0
-                out_rot270 = model(torch.rot90(images, k=3, dims=[2, 3])) * 25.0
+                outputs = model(images) * 20.0 
+                out_flip = model(torch.flip(images, dims=[3])) * 20.0
+                out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3])) * 20.0
+                out_rot270 = model(torch.rot90(images, k=3, dims=[2, 3])) * 20.0
 
                 probs = (torch.softmax(outputs, dim=1) +
                          torch.softmax(out_flip, dim=1) +

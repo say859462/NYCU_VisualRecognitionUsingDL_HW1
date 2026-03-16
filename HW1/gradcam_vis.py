@@ -103,7 +103,7 @@ def main():
                 with torch.no_grad():
                     outputs = model(input_tensor)
                     
-                    scaled_outputs = outputs * 25.0 
+                    scaled_outputs = outputs * 20.0 
                     
                     probabilities = torch.nn.functional.softmax(scaled_outputs, dim=1)[0]
                     pred_class = probabilities.argmax().item()

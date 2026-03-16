@@ -174,10 +174,10 @@ def main():
         cls_num_list=class_sample_count,
         max_m=0.5,
         weight=None,  # 初始不給權重
-        s=25.0
+        s=20.0
     ).to(device)
 
-    # 設定 DRW 啟動的 Epoch 
+    # 設定 DRW 啟動的 Epoch
     drw_epoch = int(NUM_EPOCHS * 0.5)
 
     # 3.3 Optimizer (Layer-wise LR)
@@ -282,11 +282,11 @@ def main():
                 f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
             print(f"Val Loss:   {val_loss:.4f} | Val Acc:   {val_acc:.2f}%")
 
-            
             if epoch >= drw_epoch:
                 if val_acc > best_drw_acc:
                     best_drw_acc = val_acc
-                    torch.save(model.state_dict(), './Model_Weight/best_drw_model.pth')
+                    torch.save(model.state_dict(),
+                               './Model_Weight/best_drw_model.pth')
                     print(f" Found better DRW model: {val_acc:.2f}%")
 
             # 5.5 Early Stopping & Model Saving Logic

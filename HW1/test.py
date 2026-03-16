@@ -74,23 +74,24 @@ def main():
 
             # --- TTA 整合邏輯 (參考 analyze.py 實作) ---
             if args.tta == 'none':
-                # 無 TTA 模式
-                outputs = model(images)
+                outputs = model(images) * 20.0  # ✅ 補上 * 20.0
                 avg_probs = F.softmax(outputs, dim=1)
 
             elif args.tta == 'flip':
-                # 水平翻轉 TTA
-                out_orig = model(images)
-                out_flip = model(torch.flip(images, dims=[3]))
+                out_orig = model(images) * 20.0       # ✅ 補上 * 20.0
+                out_flip = model(torch.flip(
+                    images, dims=[3])) * 20.0  # ✅ 補上 * 20.0
                 avg_probs = (F.softmax(out_orig, dim=1) +
                              F.softmax(out_flip, dim=1)) / 2.0
 
             elif args.tta == 'rotational':
-                # 4-Crop Rotational TTA (原本的實作)
-                out_orig = model(images)
-                out_flip = model(torch.flip(images, dims=[3]))
-                out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3]))
-                out_rot270 = model(torch.rot90(images, k=3, dims=[2, 3]))
+                out_orig = model(images) * 20.0       # ✅ 補上 * 20.0
+                out_flip = model(torch.flip(
+                    images, dims=[3])) * 20.0  # ✅ 補上 * 20.0
+                out_rot90 = model(torch.rot90(
+                    images, k=1, dims=[2, 3])) * 20.0  # ✅ 補上 * 20.0
+                out_rot270 = model(torch.rot90(
+                    images, k=3, dims=[2, 3])) * 20.0  # ✅ 補上 * 20.0
 
                 p0 = F.softmax(out_orig, dim=1)
                 p1 = F.softmax(out_flip, dim=1)
