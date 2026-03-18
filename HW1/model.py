@@ -93,7 +93,7 @@ class ImageClassificationModel(nn.Module):
             nn.Linear(1024, 512),
             nn.BatchNorm1d(512),
             nn.PReLU(),
-            nn.Dropout(p=0.5)
+            nn.Dropout(p=0.4)
         )
         self.classifier_cbp = NormedLinear(512, num_classes)
 
@@ -101,7 +101,7 @@ class ImageClassificationModel(nn.Module):
             nn.Linear(512 + 512, 512),
             nn.BatchNorm1d(512),
             nn.PReLU(),
-            nn.Dropout(p=0.5)
+            nn.Dropout(p=0.4)
         )
         self.classifier_gem = NormedLinear(512, num_classes)
 
