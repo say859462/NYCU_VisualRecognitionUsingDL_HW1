@@ -48,7 +48,7 @@ def get_optimizer(model, lr_base=1e-4, weight_decay=3e-4):
     param_groups = [
         {'params': backbone_l1_l3_params, 'lr': lr_base * 0.1},  # Index 0
         {'params': backbone_l4_params, 'lr': lr_base * 0.5},          # Index 1
-        {'params': head_params, 'lr': lr_base * 1.5}              # Index 2
+        {'params': head_params, 'lr': lr_base * 4.0}              # Index 2
     ]
 
     optimizer = optim.AdamW(param_groups, weight_decay=weight_decay)
@@ -102,7 +102,7 @@ def main():
     # 2. Data Preprocessing & Loaders
     # ==============================================================================
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(512, scale=(0.6, 1.0)),
+        transforms.RandomResizedCrop(512, scale=(0.4, 1.0)),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomRotation(degrees=15),
         transforms.ColorJitter(
@@ -171,16 +171,16 @@ def main():
     # 階段 1 (Epoch 0~23)：不加權的 LDAM Loss (專注學習特徵)
     criterion = LDAMLoss(
         cls_num_list=class_sample_count,
-        max_m=0.55,
+        max_m=0.45,
         weight=None,  # 初始不給權重
-        s=20.0
+        s=15.0
     ).to(device)
 
     # 設定 DRW 啟動的 Epoch
-    drw_epoch = 15  # 在訓練的 60% 時啟動 DRW 和 Attention Crop
+    drw_epoch = int(NUM_EPOCHS * 0.5)  # 在訓練的 60% 時啟動 DRW 和 Attention Crop
 
     # 3.3 Optimizer (Layer-wise LR)
-    optimizer = get_optimizer(model, lr_base=LR_BASE, weight_decay=5e-3)
+    optimizer = get_optimizer(model, lr_base=LR_BASE, weight_decay=1e-3)
 
     # 3.4 Scheduler
     from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
