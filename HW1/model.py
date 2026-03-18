@@ -151,6 +151,8 @@ class ImageClassificationModel(nn.Module):
 
         # --- Layer 3 Processing ---
         self.se_l3 = SEBlock(in_channels=1024, reduction=16)
+        self.rsa_l3 = ResidualSpatialAttention(
+            kernel_size=7)  # ⭐ 新增：為 Layer 3 裝備空間注意力
         self.reduce3 = nn.Sequential(
             nn.Conv2d(1024, 512, kernel_size=1, bias=False),
             nn.BatchNorm2d(512),
@@ -161,43 +163,54 @@ class ImageClassificationModel(nn.Module):
         # --- Layer 4 Processing ---
         self.se_l4 = SEBlock(in_channels=2048, reduction=16)
         self.rsa = ResidualSpatialAttention(kernel_size=7)
+
+        # ⭐ 極致壓縮 1：源頭降維，嚴格限制 ResNet 輸出的特徵量
         self.reduce4 = nn.Sequential(
-            nn.Conv2d(2048, 1024, kernel_size=1, bias=False),
-            nn.BatchNorm2d(1024),
+            nn.Conv2d(2048, 512, kernel_size=1, bias=False),  # 退回 512
+            nn.BatchNorm2d(512),
             nn.ReLU(inplace=True)
         )
 
         self.gem4 = GeM(p=2.5)
 
-        # CBP 維度設為 2048 避免過擬合
-        self.output_dim = 2048
+        # ⭐ 極致壓縮 2：CBP 維度緊縮
+        self.output_dim = 1024  # 從 2048 砍半至 1024
         self.cbp = CompactBilinearPooling(
-            input_dim=1024, output_dim=self.output_dim)
+            input_dim=512, output_dim=self.output_dim)
 
-        # ⭐ 核心改動：Dual-head 架構 (雙表頭)
-        # 表頭 A (分類/鑑別)：專門處理 CBP 的二階紋理特徵
+        # ⭐ 極致壓縮 3：Dual-head 架構 (雙表頭全部對齊 512 決策空間)
+        # 表頭 A (分類/鑑別)：處理 CBP (1024 -> 512)
         self.embedding_cbp = nn.Sequential(
-            nn.Linear(2048, 1024),
-            nn.BatchNorm1d(1024),
-            nn.PReLU(),
-            nn.Dropout(p=0.5)
-        )
-        self.classifier_cbp = NormedLinear(1024, num_classes)
-
-        # 表頭 B (定位/全域)：專門處理 p3 與 p4_gem 的空間連續特徵
-        self.embedding_gem = nn.Sequential(
-            nn.Linear(512 + 1024, 512),  # Layer 3 (512) + Layer 4 GeM (512)
+            nn.Linear(1024, 512),
             nn.BatchNorm1d(512),
             nn.PReLU(),
             nn.Dropout(p=0.5)
         )
-        self.classifier_gem = NormedLinear(512, num_classes)
+        self.classifier_cbp = NormedLinear(512, num_classes)  # 修復維度 Bug
+
+        # 表頭 B (定位/全域)：處理 p3(512) + p4_gem(512) = 1024 -> 512
+        self.embedding_gem = nn.Sequential(
+            nn.Linear(512 + 512, 512),
+            nn.BatchNorm1d(512),
+            nn.PReLU(),
+            nn.Dropout(p=0.5)
+        )
+        self.classifier_gem = NormedLinear(512, num_classes)  # 修復維度 Bug
 
     def forward(self, x, return_attn=False):
         # Layer 3
         f3_raw = self.backbone_l1_l3(x)
-        f3_att = self.se_l3(f3_raw)
-        p3 = self.gem3(self.reduce3(f3_att)).flatten(1)          # [B, 512]
+        f3_se = self.se_l3(f3_raw)  # 先過通道注意力
+
+        # ⭐ 新增：計算並套用 Layer 3 的空間注意力
+        avg_out_l3 = torch.mean(f3_se, dim=1, keepdim=True)
+        max_out_l3, _ = torch.max(f3_se, dim=1, keepdim=True)
+        x_cat_l3 = torch.cat([avg_out_l3, max_out_l3], dim=1)
+        spatial_attn_l3 = self.rsa_l3.sigmoid(self.rsa_l3.conv1(x_cat_l3))
+        f3_att = f3_se * (1 + spatial_attn_l3)  # 強化關鍵紋理區域
+
+        # 降維與池化
+        p3 = self.gem3(self.reduce3(f3_att)).flatten(1)
 
         # Layer 4
         f4_raw = self.backbone_l4(f3_raw)
