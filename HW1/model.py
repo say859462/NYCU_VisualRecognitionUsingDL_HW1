@@ -162,17 +162,17 @@ class ImageClassificationModel(nn.Module):
         self.se_l4 = SEBlock(in_channels=2048, reduction=16)
         self.rsa = ResidualSpatialAttention(kernel_size=7)
         self.reduce4 = nn.Sequential(
-            nn.Conv2d(2048, 512, kernel_size=1, bias=False),
-            nn.BatchNorm2d(512),
+            nn.Conv2d(2048, 1024, kernel_size=1, bias=False),
+            nn.BatchNorm2d(1024),
             nn.ReLU(inplace=True)
         )
 
         self.gem4 = GeM(p=2.5)
 
         # CBP 維度設為 2048 避免過擬合
-        self.output_dim =2048 
+        self.output_dim = 2048
         self.cbp = CompactBilinearPooling(
-            input_dim=512, output_dim=self.output_dim)
+            input_dim=1024, output_dim=self.output_dim)
 
         # ⭐ 核心改動：Dual-head 架構 (雙表頭)
         # 表頭 A (分類/鑑別)：專門處理 CBP 的二階紋理特徵
@@ -186,7 +186,7 @@ class ImageClassificationModel(nn.Module):
 
         # 表頭 B (定位/全域)：專門處理 p3 與 p4_gem 的空間連續特徵
         self.embedding_gem = nn.Sequential(
-            nn.Linear(512 + 512, 512),  # Layer 3 (512) + Layer 4 GeM (512)
+            nn.Linear(512 + 1024, 512),  # Layer 3 (512) + Layer 4 GeM (512)
             nn.BatchNorm1d(512),
             nn.PReLU(),
             nn.Dropout(p=0.5)
