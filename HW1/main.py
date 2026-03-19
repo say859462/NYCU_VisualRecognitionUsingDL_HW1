@@ -138,7 +138,7 @@ def main():
     # ⭐ 移除 center_loss 相關參數，讓優化器專注於神經網路權重
     param_groups = [
         {'params': backbone_l1_l3_params, 'lr': LR_BASE * 0.1},
-        {'params': backbone_l4_params, 'lr': LR_BASE * 0.5},
+        {'params': backbone_l4_params, 'lr': LR_BASE * 1.0},
         {'params': head_params, 'lr': LR_BASE * 2.0}
     ]
 
