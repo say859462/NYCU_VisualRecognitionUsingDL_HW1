@@ -29,7 +29,7 @@ def main():
     parser.add_argument('--config_name', type=str, default='29th',
                         help='Name for the output directory')
 
-    parser.add_argument('--img_size', type=int, default=576,
+    parser.add_argument('--img_size', type=int, default=512,
                         help='Crop size for inference')
     args = parser.parse_args()
 
@@ -46,8 +46,8 @@ def main():
 
     # 推斷用的 Transform (可以根據需求調整 Resize 大小以榨取效能)
     val_transform = transforms.Compose([
-        transforms.Resize(int(640)),  # 保持比例縮放
-        transforms.CenterCrop(576),
+        transforms.Resize(576),  # 保持比例縮放
+        transforms.CenterCrop(512),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])

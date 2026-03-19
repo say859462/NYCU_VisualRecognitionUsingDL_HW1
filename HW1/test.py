@@ -42,8 +42,8 @@ def main():
 
     # 推論前處理設定
     test_transform = transforms.Compose([
-        transforms.Resize(int(640)),
-        transforms.CenterCrop(576),
+        transforms.Resize(576),
+        transforms.CenterCrop(512),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])
