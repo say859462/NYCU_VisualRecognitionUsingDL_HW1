@@ -137,7 +137,7 @@ def main():
 
     # ⭐ 移除 center_loss 相關參數，讓優化器專注於神經網路權重
     param_groups = [
-        {'params': backbone_l1_l3_params, 'lr': LR_BASE * 0.1},
+        {'params': backbone_l1_l3_params, 'lr': LR_BASE * 0.5},
         {'params': backbone_l4_params, 'lr': LR_BASE * 1.0},
         {'params': head_params, 'lr': LR_BASE * 2.0}
     ]
@@ -145,9 +145,9 @@ def main():
     optimizer = optim.AdamW(param_groups, weight_decay=1e-3)
 
     from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
-    warmup_epochs = 5
+    warmup_epochs = 10
     cosine_epochs = NUM_EPOCHS - warmup_epochs
-    warmup_sch = LinearLR(optimizer, start_factor=0.1,
+    warmup_sch = LinearLR(optimizer, start_factor=0.5,
                           total_iters=warmup_epochs)
     cosine_sch = CosineAnnealingLR(
         optimizer, T_max=cosine_epochs, eta_min=1e-6)
