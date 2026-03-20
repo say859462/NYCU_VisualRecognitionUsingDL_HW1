@@ -14,8 +14,20 @@ from pytorch_grad_cam import GradCAM
 from pytorch_grad_cam.utils.image import show_cam_on_image
 
 
+# ⭐ 新增一個 Wrapper 類別，專門用來處理 Tuple 解包與 s=15.0 縮放
+class ModelWrapper(torch.nn.Module):
+    def __init__(self, model, scale=15.0):
+        super(ModelWrapper, self).__init__()
+        self.model = model
+        self.scale = scale
+
+    def forward(self, x):
+        logits, _ = self.model(x)
+        # 直接在這裡乘上 scale，讓 Grad-CAM 抓到的梯度與機率都是最準確的
+        return logits * self.scale
+
+
 def main():
-    # ... (前面的 argparse 參數設定保持不變) ...
     parser = argparse.ArgumentParser(
         description="Pure ResNeXt Grad-CAM Visualization")
     parser.add_argument('--val_dir', type=str, default='./Dataset/data/val')
@@ -24,7 +36,7 @@ def main():
                         default='./Model_Weight/best_model.pth')
     parser.add_argument('--num_classes', type=int, default=100)
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/GradCAM_Outputs/36th')
+                        default='./Plot/GradCAM_Outputs/37th')
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -35,12 +47,15 @@ def main():
     model.load_state_dict(torch.load(args.model_path, map_location=device))
     model.eval()
 
-    # ⭐ 修正：綁定官方 ResNeXt 的 Layer 3 與 Layer 4 的最後一個 Block
-    cam_l3 = GradCAM(model=model, target_layers=[model.rsa3])  
-    cam_l4 = GradCAM(model=model, target_layers=[model.rsa4])
+    # ⭐ 將模型包裝起來
+    wrapped_model = ModelWrapper(model, scale=15.0)
+
+    # ⭐ 注意：這裡的 model 改傳入 wrapped_model，但 target_layers 依然綁定原本的 model.rsa
+    cam_l3 = GradCAM(model=wrapped_model, target_layers=[model.rsa3])
+    cam_l4 = GradCAM(model=wrapped_model, target_layers=[model.rsa4])
 
     preprocess_geo = transforms.Compose(
-        [transforms.Resize(576), transforms.CenterCrop(512)])
+        [transforms.Resize(640), transforms.CenterCrop(576)])
     preprocess_tensor = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
@@ -59,6 +74,11 @@ def main():
 
         all_images = [os.path.join(class_dir, f) for f in os.listdir(
             class_dir) if f.lower().endswith(valid_extensions)]
+
+        # 避免樣本不足的防呆機制
+        if len(all_images) == 0:
+            continue
+
         sampled_image_paths = random.sample(all_images, min(
             args.num_samples_per_class, len(all_images)))
 
@@ -70,10 +90,9 @@ def main():
             rgb_img = np.float32(cropped_img) / 255.0
 
             with torch.no_grad():
-                # ⭐ 修正：現在只會回傳 logits
-                outputs, _ = model(input_tensor)
-                probabilities = torch.nn.functional.softmax(
-                    outputs * 15.0, dim=1)[0]
+                # ⭐ 這裡可以直接呼叫 wrapper，它會吐出縮放好且單一的 Tensor
+                outputs = wrapped_model(input_tensor)
+                probabilities = torch.nn.functional.softmax(outputs, dim=1)[0]
                 pred_class = probabilities.argmax().item()
                 pred_score = probabilities[pred_class].item()
 
