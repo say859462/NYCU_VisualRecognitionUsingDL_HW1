@@ -36,8 +36,8 @@ def main():
     model.eval()
 
     # ⭐ 修正：綁定官方 ResNeXt 的 Layer 3 與 Layer 4 的最後一個 Block
-    cam_l3 = GradCAM(model=model, target_layers=[model.layer3[-1]])
-    cam_l4 = GradCAM(model=model, target_layers=[model.layer4[-1]])
+    cam_l3 = GradCAM(model=model, target_layers=[model.rsa3])  
+    cam_l4 = GradCAM(model=model, target_layers=[model.rsa4])
 
     preprocess_geo = transforms.Compose(
         [transforms.Resize(576), transforms.CenterCrop(512)])
