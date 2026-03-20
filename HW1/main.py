@@ -91,7 +91,7 @@ def main():
     model = ImageClassificationModel(
         num_classes=100, pretrained=True).to(device)
 
-    # ⭐ 修正 1：對齊官方 Backbone 名稱來凍結淺層 (選配，凍結 stem 與 layer1 可穩定初期訓練)
+    # 凍結淺層 (保持您的設定)
     for name, param in model.named_parameters():
         if any(name.startswith(prefix) for prefix in ['conv1', 'bn1', 'layer1']):
             param.requires_grad = False
@@ -101,17 +101,13 @@ def main():
     train_labels = train_dataset.targets
     class_sample_count = np.bincount(train_labels, minlength=NUM_CLASSES)
 
-    # 既然有預訓練好基底，直接啟用 LDAM + OHEM
+    # 保留 LDAM
     criterion = SimilarityLDAMLoss(
-        cls_num_list=class_sample_count, max_m=0.45, s=20.0, alpha=0.1, keep_ratio=0.7
+        cls_num_list=class_sample_count, max_m=0.45, s=15.0, alpha=0.1, keep_ratio=0.7
     ).to(device)
 
-    supcon_loss_cbp = SupConLoss(temperature=0.1).to(device)
-    supcon_loss_gem = SupConLoss(temperature=0.1).to(device)
-
-    # ⭐ 修正 2：對齊新的模組名稱進行非對稱學習率分組
+    # ⭐ 修正優化器分組：現在只剩 Backbone 和 Head
     head_params = []
-    attention_cbp_params = []
     backbone_params = []
 
     for name, param in model.named_parameters():
@@ -119,18 +115,15 @@ def main():
             continue
         if 'classifier' in name or 'embedding' in name:
             head_params.append(param)
-        elif 'se_' in name or 'rsa_' in name or 'reduce' in name or 'cbp' in name or 'gem' in name:
-            attention_cbp_params.append(param)
         else:
-            backbone_params.append(param)  # 官方 resnext 預訓練權重
+            backbone_params.append(param)
 
     param_groups = [
-        {'params': backbone_params, 'lr': LR_BASE * 0.1},      # 預訓練權重只做微調
-        {'params': attention_cbp_params, 'lr': LR_BASE * 1.0},  # 新加的注意力模組正常學習
-        {'params': head_params, 'lr': LR_BASE * 2.0},          # 分類頭快速學習
+        {'params': backbone_params, 'lr': LR_BASE * 0.1},
+        {'params': head_params, 'lr': LR_BASE * 2.0},
     ]
 
-    optimizer = optim.AdamW(param_groups, weight_decay=1e-3)
+    optimizer = optim.AdamW(param_groups, weight_decay=3e-4)
 
     from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
     warmup_epochs = 5
@@ -183,23 +176,14 @@ def main():
     # 5. Main Training Loop
     # ==============================================================================
     training_start_time = time.time()
-    CROP_EPOCH = int(NUM_EPOCHS * 0.4)
     try:
         for epoch in range(start_epoch, NUM_EPOCHS):
             print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")
 
-            # ⭐ 修正 3：取消階段性啟動，從第一輪直接開啟 Attention Crop 狂暴模式
-            enable_crop = (epoch >= CROP_EPOCH)
-            if enable_crop and epoch == CROP_EPOCH:
-                print(f" [Attention Crop] activated from Epoch 1!")
-
             # 修正 4：正確傳遞 supcon_loss 給 train_one_epoch，並移除用不到的 center_loss
             train_loss, train_acc = train_one_epoch(
                 model, train_loader, criterion, optimizer, device, scaler,
-                supcon_loss_cbp=supcon_loss_cbp,
-                supcon_loss_gem=supcon_loss_gem,
-                max_grad_norm=2.0,
-                use_crop=enable_crop
+                max_grad_norm=2.0
             )
 
             val_loss, val_acc, val_preds, val_labels = validate_one_epoch(
