@@ -1,7 +1,8 @@
 import torch
 from tqdm import tqdm
 
-def validate_one_epoch(model, val_loader, criterion, device, s=20.0):
+
+def validate_one_epoch(model, val_loader, criterion, device):
     """
     s: 縮放係數 (scale factor)，必須與 SimilarityLDAMLoss 中的 s 保持一致，
        確保 val_loss 與 train_loss 在同一個數量級。
@@ -21,17 +22,14 @@ def validate_one_epoch(model, val_loader, criterion, device, s=20.0):
 
             # 取得 Ensemble Logits (來自 NormedLinear，數值在 [-1, 1])
             outputs = model(images)
-            
-            # ⭐ 修正：補上 s=20.0 的縮放，還原 Logits 尺度以計算正確的 Cross Entropy Loss
-            scaled_outputs = outputs * s
 
-            # 計算驗證 Loss
-            loss = criterion(scaled_outputs, labels)
+            # ⭐ 修正：不需要縮放，直接計算驗證 Loss
+            loss = criterion(outputs, labels)
 
             running_loss += loss.item() * images.size(0)
 
-            # 計算準確率
-            _, preds = torch.max(scaled_outputs, 1)
+            # 計算準確率 (把 scaled_outputs 改回 outputs)
+            _, preds = torch.max(outputs, 1)
 
             correct_preds += torch.sum(preds == labels.data).item()
             total_preds += images.size(0)

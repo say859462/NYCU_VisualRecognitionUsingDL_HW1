@@ -55,7 +55,7 @@ class ImageClassificationModel(nn.Module):
             nn.PReLU(),
             nn.Dropout(0.4)
         )
-        self.classifier = NormedLinear(512, num_classes)
+        self.classifier = nn.Linear(512, num_classes)
 
     def forward(self, x, return_attn=False):
         x = self.conv1(x)

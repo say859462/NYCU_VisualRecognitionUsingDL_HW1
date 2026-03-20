@@ -70,11 +70,9 @@ def main():
             rgb_img = np.float32(cropped_img) / 255.0
 
             with torch.no_grad():
-                # ⭐ 修正：現在只會回傳 logits
                 outputs = model(input_tensor)
-                s_vis = 20.0  # 對齊推論時的 Scale
-                probabilities = torch.nn.functional.softmax(
-                    outputs * s_vis, dim=1)[0]
+                # ⭐ 直接使用 outputs，不需要乘上 s_vis = 20.0
+                probabilities = torch.nn.functional.softmax(outputs, dim=1)[0]
                 pred_class = probabilities.argmax().item()
                 pred_score = probabilities[pred_class].item()
 

@@ -102,9 +102,7 @@ def main():
     class_sample_count = np.bincount(train_labels, minlength=NUM_CLASSES)
 
     # 保留 LDAM
-    criterion = SimilarityLDAMLoss(
-        cls_num_list=class_sample_count, max_m=0.45, s=15.0, alpha=0.1, keep_ratio=0.7
-    ).to(device)
+    criterion = nn.CrossEntropyLoss().to(device)
 
     # ⭐ 修正優化器分組：現在只剩 Backbone 和 Head
     head_params = []
@@ -196,7 +194,7 @@ def main():
             history['val_acc'].append(val_acc)
 
             lr_backbone = optimizer.param_groups[0]['lr']
-            lr_head = optimizer.param_groups[2]['lr']
+            lr_head = optimizer.param_groups[1]['lr']
             print(f"LR_Backbone: {lr_backbone:.6f} | LR_Head: {lr_head:.6f}")
             print(
                 f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")

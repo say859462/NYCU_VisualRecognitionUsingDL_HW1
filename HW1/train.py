@@ -2,7 +2,8 @@ import torch
 from tqdm import tqdm
 import torch.nn.utils as nn_utils
 
-def train_one_epoch(model, train_loader, criterion, optimizer, device, scaler, 
+
+def train_one_epoch(model, train_loader, criterion, optimizer, device, scaler,
                     max_grad_norm=2.0):
     model.train()
     running_loss = 0.0
@@ -14,14 +15,13 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, scaler,
         images, labels = images.to(device), labels.to(device)
         optimizer.zero_grad()
 
-        with torch.amp.autocast('cuda', dtype=torch.bfloat16): 
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             # 1. 單純的前向傳播
             logits, embed = model(images)
-            
-            # 2. 計算 LDAM Loss (OHEM 內建於其中)
-            weight = model.classifier.weight
-            loss = criterion(logits, labels, weight)
-            
+
+            # 2. ⭐ 計算標準 Cross Entropy Loss
+            loss = criterion(logits, labels)
+
         # 3. 反向傳播
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)

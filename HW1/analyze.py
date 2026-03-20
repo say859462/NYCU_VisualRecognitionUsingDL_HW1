@@ -79,30 +79,27 @@ def main():
     model.eval()
     running_loss, correct_preds, total_preds = 0.0, 0, 0
     all_preds, all_labels = [], []
-    DLAM_s = 20.0
     with torch.no_grad():
         pbar = tqdm(val_loader, desc=f"Validating ({args.tta})", colour="cyan")
         for images, labels in pbar:
             images, labels = images.to(device), labels.to(device)
 
-            # --- TTA 核心邏輯 ---
+            # --- TTA 核心邏輯 (純 CrossEntropy 版本) ---
             if args.tta == 'none':
-                outputs = model(images) * DLAM_s
+                outputs = model(images)
                 probs = torch.softmax(outputs, dim=1)
 
             elif args.tta == 'flip':
-                outputs = model(images) * DLAM_s
-                out_flip = model(torch.flip(images, dims=[3])) * DLAM_s
+                outputs = model(images)
+                out_flip = model(torch.flip(images, dims=[3]))
                 probs = (torch.softmax(outputs, dim=1) +
                          torch.softmax(out_flip, dim=1)) / 2.0
 
             elif args.tta == 'rotational':
-                outputs = model(images) * DLAM_s
-                out_flip = model(torch.flip(images, dims=[3])) * DLAM_s
-                out_rot90 = model(torch.rot90(
-                    images, k=1, dims=[2, 3])) * DLAM_s
-                out_rot270 = model(torch.rot90(
-                    images, k=3, dims=[2, 3])) * DLAM_s
+                outputs = model(images)
+                out_flip = model(torch.flip(images, dims=[3]))
+                out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3]))
+                out_rot270 = model(torch.rot90(images, k=3, dims=[2, 3]))
 
                 probs = (torch.softmax(outputs, dim=1) +
                          torch.softmax(out_flip, dim=1) +
