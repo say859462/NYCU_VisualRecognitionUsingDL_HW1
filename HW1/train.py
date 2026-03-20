@@ -14,13 +14,12 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, scaler, m
         optimizer.zero_grad()
 
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-            # 1. 單純的前向傳播
             logits, embed = model(images)
             
-            # 2. ⭐ 計算標準 Cross Entropy Loss
-            loss = criterion(logits, labels)
+            # ⭐ 傳入 classifier.weight 以計算 SimilarityLDAMLoss
+            weight = model.classifier.weight
+            loss = criterion(logits, labels, weight)
 
-        # 3. 反向傳播
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
         nn_utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)

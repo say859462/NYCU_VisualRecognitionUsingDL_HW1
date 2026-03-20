@@ -12,6 +12,16 @@ class GeM(nn.Module):
     def forward(self, x):
         return F.avg_pool2d(x.clamp(min=self.eps).pow(self.p), (x.size(-2), x.size(-1))).pow(1./self.p)
 
+# ⭐ 裝回 NormedLinear
+class NormedLinear(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(NormedLinear, self).__init__()
+        self.weight = nn.Parameter(torch.Tensor(in_features, out_features))
+        self.weight.data.uniform_(-1, 1).renorm_(2, 1, 1e-5).mul_(1e5)
+
+    def forward(self, x):
+        return torch.mm(F.normalize(x, p=2, dim=1), F.normalize(self.weight, p=2, dim=0))
+
 class ImageClassificationModel(nn.Module):
     def __init__(self, num_classes: int = 100, pretrained: bool = True):
         super(ImageClassificationModel, self).__init__()
@@ -29,12 +39,10 @@ class ImageClassificationModel(nn.Module):
         self.layer3 = backbone.layer3
         self.layer4 = backbone.layer4
 
-        # ⭐ 多尺度特徵融合：為 Layer 3 和 Layer 4 分別準備 GeM 池化
+        # 多尺度特徵融合
         self.gem3 = GeM(p=3.0)
         self.gem4 = GeM(p=3.0)
 
-        # Layer 3 輸出 1024 維，Layer 4 輸出 2048 維，拼接後為 3072 維
-        # 透過資訊漏斗壓縮至 512 維，保留精華細節並防範過擬合
         self.embedding = nn.Sequential(
             nn.Linear(1024 + 2048, 512),
             nn.BatchNorm1d(512),
@@ -42,8 +50,8 @@ class ImageClassificationModel(nn.Module):
             nn.Dropout(0.4)
         )
         
-        # 換回最純粹的標準分類器
-        self.classifier = nn.Linear(512, num_classes)
+        # ⭐ 換成 LDAM 專屬的 NormedLinear
+        self.classifier = NormedLinear(512, num_classes)
 
     def forward(self, x, return_attn=False):
         x = self.conv1(x)
@@ -54,14 +62,12 @@ class ImageClassificationModel(nn.Module):
         x = self.layer1(x)
         x = self.layer2(x)
         
-        # 提取 Layer 3 (細緻紋理) 與 Layer 4 (高階語義)
-        f3 = self.layer3(x)      # [B, 1024, H', W']
-        f4 = self.layer4(f3)     # [B, 2048, H'', W'']
+        f3 = self.layer3(x)      
+        f4 = self.layer4(f3)     
 
-        # 雙層池化與拼接
         p3 = self.gem3(f3).flatten(1)
         p4 = self.gem4(f4).flatten(1)
-        p_cat = torch.cat([p3, p4], dim=1)  # [B, 3072]
+        p_cat = torch.cat([p3, p4], dim=1)  
 
         embed = self.embedding(p_cat)
         logits = self.classifier(embed)
@@ -73,5 +79,5 @@ class ImageClassificationModel(nn.Module):
 
     def check_parameters(self):
         total = sum(p.numel() for p in self.parameters())
-        print(f"📊 Pure ResNeXt (Multi-Scale) Status: {total/1e6:.2f}M params")
+        print(f"📊 ResNeXt (Multi-Scale + LDAM) Status: {total/1e6:.2f}M params")
         return total < 100_000_000

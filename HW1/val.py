@@ -1,7 +1,8 @@
 import torch
 from tqdm import tqdm
 
-def validate_one_epoch(model, val_loader, criterion, device):
+# ⭐ 加上 s=20.0 參數
+def validate_one_epoch(model, val_loader, criterion, device, s=20.0):
     model.eval()
     running_loss = 0.0
     correct_preds = 0
@@ -15,16 +16,17 @@ def validate_one_epoch(model, val_loader, criterion, device):
         for images, labels in pbar:
             images, labels = images.to(device), labels.to(device)
 
-            # 取得一般 Logits
             outputs = model(images)
             
-            # ⭐ 直接計算驗證 Loss，不需縮放
-            loss = criterion(outputs, labels)
+            # ⭐ 補回縮放，還原尺度
+            scaled_outputs = outputs * s
+            
+            loss = criterion(scaled_outputs, labels)
 
             running_loss += loss.item() * images.size(0)
             
-            # 計算準確率
-            _, preds = torch.max(outputs, 1)
+            # ⭐ 改用 scaled_outputs 預測
+            _, preds = torch.max(scaled_outputs, 1)
 
             correct_preds += torch.sum(preds == labels.data).item()
             total_preds += images.size(0)

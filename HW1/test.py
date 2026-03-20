@@ -72,43 +72,22 @@ def main():
         for images, _ in tqdm(test_loader, desc="Testing", colour="yellow"):
             images = images.to(device)
 
-            # --- TTA 整合邏輯 (參考 analyze.py 實作) ---
+            # --- TTA 整合邏輯 (純粹 CrossEntropy 版本，無任何縮放) ---
             if args.tta == 'none':
-<<<<<<< HEAD
-                outputs = model(images) * 20.0  # ⭐ 補上 * 20.0
+                outputs = model(images)
                 avg_probs = F.softmax(outputs, dim=1)
 
             elif args.tta == 'flip':
-                out_orig = model(images) * 20.0
-                out_flip = model(torch.flip(images, dims=[3])) * 20.0
-=======
-                outputs = model(images) * 20.0  # ✅ 補上 * 20.0
-                avg_probs = F.softmax(outputs, dim=1)
-
-            elif args.tta == 'flip':
-                out_orig = model(images) * 20.0       # ✅ 補上 * 20.0
-                out_flip = model(torch.flip(
-                    images, dims=[3])) * 20.0  # ✅ 補上 * 20.0
->>>>>>> parent of 8faafef (exp 34 bug fixed)
+                out_orig = model(images)
+                out_flip = model(torch.flip(images, dims=[3]))
                 avg_probs = (F.softmax(out_orig, dim=1) +
                              F.softmax(out_flip, dim=1)) / 2.0
 
             elif args.tta == 'rotational':
-<<<<<<< HEAD
-                out_orig = model(images) * 20.0
-                out_flip = model(torch.flip(images, dims=[3])) * 20.0
-                out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3])) * 20.0
-                out_rot270 = model(torch.rot90(
-                    images, k=3, dims=[2, 3])) * 20.0
-=======
-                out_orig = model(images) * 20.0       # ✅ 補上 * 20.0
-                out_flip = model(torch.flip(
-                    images, dims=[3])) * 20.0  # ✅ 補上 * 20.0
-                out_rot90 = model(torch.rot90(
-                    images, k=1, dims=[2, 3])) * 20.0  # ✅ 補上 * 20.0
-                out_rot270 = model(torch.rot90(
-                    images, k=3, dims=[2, 3])) * 20.0  # ✅ 補上 * 20.0
->>>>>>> parent of 8faafef (exp 34 bug fixed)
+                out_orig = model(images)
+                out_flip = model(torch.flip(images, dims=[3]))
+                out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3]))
+                out_rot270 = model(torch.rot90(images, k=3, dims=[2, 3]))
 
                 p0 = F.softmax(out_orig, dim=1)
                 p1 = F.softmax(out_flip, dim=1)

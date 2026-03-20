@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 import torchvision.transforms.functional as TF
 from tqdm import tqdm
-import torch.functional as F
+import torch.nn.functional as F
 from dataset import ImageDataset
 from model import ImageClassificationModel
 from utils import (
