@@ -183,7 +183,7 @@ def main():
     # 5. Main Training Loop
     # ==============================================================================
     training_start_time = time.time()
-    CROP_EPOCH = 10
+    CROP_EPOCH = int(NUM_EPOCHS * 0.4)
     try:
         for epoch in range(start_epoch, NUM_EPOCHS):
             print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")
