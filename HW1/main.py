@@ -5,6 +5,7 @@ from model import ImageClassificationModel
 from dataset import ImageDataset
 import torch
 import os
+import math
 import json
 import time
 import numpy as np
@@ -41,7 +42,7 @@ def main():
 
     # ⭐ 移除銳利化，加入 RandomErasing 來抹除「大拇指」等作弊特徵
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(512, scale=(0.5, 1.0)),
+        transforms.RandomResizedCrop(576, scale=(0.5, 1.0)),
         transforms.RandomHorizontalFlip(p=0.5),
         RandomDiscreteRotation(angles=[0, 90, 270]),
         transforms.ColorJitter(brightness=0.1, contrast=0.1),
@@ -52,7 +53,7 @@ def main():
     ])
 
     val_transform = transforms.Compose([
-        transforms.Resize(576), transforms.CenterCrop(512),
+        transforms.Resize(640), transforms.CenterCrop(576),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])
@@ -71,44 +72,40 @@ def main():
     model = ImageClassificationModel(
         num_classes=NUM_CLASSES, pretrained=True).to(device)
 
-    head_params, backbone_params = [], []
-    for name, param in model.named_parameters():
-        param.requires_grad = True
-        if 'classifier' in name or 'bottleneck' in name:
-            head_params.append(param)
-        else:
-            backbone_params.append(param)
+    head_params = [p for n, p in model.named_parameters(
+    ) if 'classifier' in n or 'bottleneck' in n or 'se' in n or 'rsa' in n]
+    backbone_params = [p for n, p in model.named_parameters() if not any(
+        x in n for x in ['classifier', 'bottleneck', 'se', 'rsa'])]
 
     # ⭐ 降回標準 1e-4 的 Weight Decay
     optimizer = optim.AdamW([
         {'params': backbone_params, 'lr': LR_BASE * 1.0},
         {'params': head_params, 'lr': LR_BASE * 3.0},
-    ], weight_decay=1e-4)
+    ], weight_decay=3e-4)
 
     train_labels = train_dataset.targets
     cb_weights = get_cb_weights(
         train_labels, NUM_CLASSES, beta=0.999).to(device)
 
-    # ⭐ 採用更溫和且有效的 Class-Balanced Focal Loss
-    criterion_train = ClassBalancedFocalLoss(
-        cb_weights=cb_weights, gamma=1.5, label_smoothing=0.05).to(device)
+    criterion_ce = nn.CrossEntropyLoss(
+        label_smoothing=0.1).to(device)  # 第一階段：專注基礎特徵學習
+    criterion_focal = ClassBalancedFocalLoss(
+        cb_weights=cb_weights, gamma=1.5, label_smoothing=0.05).to(device)  # 第二階段：專殺長尾困難樣本
+
     criterion_val = nn.CrossEntropyLoss().to(device)
 
     from torch.optim.lr_scheduler import CosineAnnealingLR
 
     class WarmUpCosineAnnealingLR(torch.optim.lr_scheduler._LRScheduler):
-        def __init__(self, optimizer, T_max, warmup_epochs=5, eta_min=1e-6, last_epoch=-1):
+        def __init__(self, optimizer, T_max, warmup_epochs=5, eta_min=1e-5, last_epoch=-1):
             self.warmup_epochs = warmup_epochs
             self.T_max = T_max
             self.eta_min = eta_min
             super().__init__(optimizer, last_epoch)
 
         def get_lr(self):
-            # 1. Warmup 階段：線性爬升
             if self.last_epoch < self.warmup_epochs:
                 return [base_lr * ((self.last_epoch + 1) / self.warmup_epochs) for base_lr in self.base_lrs]
-
-            # 2. Cosine Annealing 階段：平滑下降
             progress = (self.last_epoch - self.warmup_epochs) / \
                 (self.T_max - self.warmup_epochs)
             return [self.eta_min + (base_lr - self.eta_min) * (1 + math.cos(math.pi * progress)) / 2 for base_lr in self.base_lrs]
@@ -144,19 +141,25 @@ def main():
             f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch+1}.")
 
     training_start_time = time.time()
+    DRW_EPOCH = int(NUM_EPOCHS * 0.4)
     try:
         for epoch in range(start_epoch, NUM_EPOCHS):
             print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")
 
-            # 傳入 focal loss
-            train_loss, train_acc = train_one_epoch(
-                model, train_loader, criterion_train, epoch+1, optimizer, device, scaler, max_grad_norm=2.0
-            )
-            # 驗證時使用 CE Loss 反映真實機率誤差
-            val_loss, val_acc, val_preds, val_labels = validate_one_epoch(
-                model, val_loader, criterion_val, device
-            )
+            if epoch < DRW_EPOCH:
+                criterion_train = criterion_ce
+                if epoch == 0:
+                    print("🔵 Stage 1: Standard CE Loss Activated (Focus on Foundation)")
+            else:
+                criterion_train = criterion_focal
+                if epoch == DRW_EPOCH:
+                    print("🔥 Stage 2: CB Focal Loss Activated (Focus on Long-Tail)")
 
+            # 傳入動態切換的 criterion_train
+            train_loss, train_acc = train_one_epoch(
+                model, train_loader, criterion_train, epoch+1, optimizer, device, scaler)
+            val_loss, val_acc, val_preds, val_labels = validate_one_epoch(
+                model, val_loader, criterion_val, device)
             scheduler.step()
             history['train_loss'].append(train_loss)
             history['train_acc'].append(train_acc)

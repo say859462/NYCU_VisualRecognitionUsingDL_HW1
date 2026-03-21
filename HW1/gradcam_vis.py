@@ -19,7 +19,7 @@ def main():
     parser.add_argument('--model_path', type=str,
                         default='./Model_Weight/best_model.pth')
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/GradCAM_Outputs/39th')
+                        default='./Plot/GradCAM_Outputs/41th')
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -34,7 +34,7 @@ def main():
     cam = GradCAM(model=model, target_layers=[model.rsa])
 
     preprocess_geo = transforms.Compose(
-        [transforms.Resize(576), transforms.CenterCrop(512)])
+        [transforms.Resize(640), transforms.CenterCrop(576)])
     preprocess_tensor = transforms.Compose([
         transforms.ToTensor(), transforms.Normalize(
             [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])

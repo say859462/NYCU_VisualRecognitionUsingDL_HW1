@@ -9,20 +9,6 @@ from scipy.stats import pearsonr
 import torchvision.transforms.functional as TF
 
 
-class ResidualSpatialAttention(nn.Module):
-    def __init__(self, kernel_size=7):
-        super().__init__()
-        self.conv = nn.Conv2d(
-            2, 1, kernel_size, padding=kernel_size//2, bias=False)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        avg_out = torch.mean(x, dim=1, keepdim=True)
-        max_out, _ = torch.max(x, dim=1, keepdim=True)
-        attn = self.sigmoid(self.conv(torch.cat([avg_out, max_out], dim=1)))
-        return x * (1 + attn)
-
-
 def get_cb_weights(labels_list, num_classes=100, beta=0.999):
     class_counts = np.bincount(labels_list, minlength=num_classes)
     cb_weights = [(1.0 - beta) / (1.0 - np.power(beta, count))
@@ -63,6 +49,11 @@ def plot_class_distribution(data_dir, title="Dataset Class Distribution", output
     plt.figure(figsize=(18, 6))
     plt.bar(range(len(counts)), counts, color="skyblue", edgecolor="black")
     plt.axhline(y=np.mean(counts), color="red", linestyle="--")
+    plt.xlabel("Class ID", fontsize=12)  # ⭐ 加 X 軸標籤
+    plt.ylabel("Number of Images", fontsize=12)  # ⭐ 加 Y 軸標籤
+    plt.xticks(range(len(counts)), rotation=90, fontsize=8)  # ⭐ 顯示所有 X 座標
+    plt.title(title, fontsize=14)
+    plt.tight_layout()
     plt.savefig(os.path.join(
         output_path, f"{title.replace(' ', '_')}_distribution.png"))
     plt.close()
@@ -72,21 +63,25 @@ def plot_class_distribution(data_dir, title="Dataset Class Distribution", output
 def plot_training_curves(train_losses, val_losses, train_accs, val_accs, save_path="./Plot/training_curves.png"):
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     epochs = range(1, len(train_losses) + 1)
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+    # --- Loss Plot (左圖) ---
     ax1.plot(epochs, train_losses, 'b-', label='Train Loss')
     ax1.plot(epochs, val_losses, 'r-', label='Val Loss')
-    if val_losses:
-        ax1.axvline(val_losses.index(min(val_losses)) +
-                    1, color='red', linestyle=':')
+    ax1.set_xlabel('Epoch', fontsize=12)  # 保留座標標籤
+    ax1.set_ylabel('Loss', fontsize=12)
     ax1.legend()
-    ax1.set_title('Loss')
+    ax1.set_title('Training and Validation Loss', fontsize=14)
+
+    # --- Accuracy Plot (右圖) ---
     ax2.plot(epochs, train_accs, 'b-', label='Train Acc')
     ax2.plot(epochs, val_accs, 'r-', label='Val Acc')
-    if val_accs:
-        ax2.axvline(val_accs.index(max(val_accs)) +
-                    1, color='red', linestyle=':')
+    ax2.set_xlabel('Epoch', fontsize=12)
+    ax2.set_ylabel('Accuracy (%)', fontsize=12)
     ax2.legend()
-    ax2.set_title('Accuracy')
+    ax2.set_title('Training and Validation Accuracy', fontsize=14)
+
+    plt.tight_layout()
     plt.savefig(save_path)
     plt.close()
 
@@ -95,9 +90,19 @@ def plot_per_class_error(all_preds, all_labels, num_classes=100, save_path="./Pl
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     error_rates = [np.sum(np.array(all_preds)[np.array(all_labels) == c] != c) / np.sum(np.array(
         all_labels) == c) * 100 if np.sum(np.array(all_labels) == c) > 0 else 0 for c in range(num_classes)]
-    plt.figure(figsize=(18, 6))
+
+    plt.figure(figsize=(20, 6))  # 加寬圖片以容納標籤
     plt.bar(range(num_classes), error_rates, color='salmon', edgecolor='black')
-    plt.axhline(y=np.mean(error_rates), color='red', linestyle='--')
+    plt.axhline(y=np.mean(error_rates), color='red', linestyle='--',
+                label=f'Mean Error ({np.mean(error_rates):.1f}%)')
+
+    plt.xlabel('Class ID', fontsize=12)  # ⭐ 加 X 軸標籤
+    plt.ylabel('Error Rate (%)', fontsize=12)  # ⭐ 加 Y 軸標籤
+    plt.xticks(range(num_classes), rotation=90,
+               fontsize=8)  # ⭐ 顯示出 0~99 所有 Class ID
+    plt.title('Error Rate per Class', fontsize=14)
+    plt.legend()
+    plt.tight_layout()
     plt.savefig(save_path)
     plt.close()
     return error_rates
@@ -110,12 +115,26 @@ def plot_long_tail_accuracy(train_labels, val_preds, val_labels, num_classes=100
         val_accs[c] = np.sum(np.array(val_preds)[np.array(val_labels) == c] == c) / np.sum(
             np.array(val_labels) == c) * 100 if np.sum(np.array(val_labels) == c) > 0 else 0
     sorted_idx = np.argsort(train_counts)[::-1]
-    fig, ax1 = plt.subplots(figsize=(16, 6))
-    ax1.bar(range(num_classes),
-            train_counts[sorted_idx], color='skyblue', alpha=0.6)
+
+    fig, ax1 = plt.subplots(figsize=(18, 6))
+    ax1.bar(range(num_classes), train_counts[sorted_idx],
+            color='skyblue', alpha=0.6, label='Train Image Count')
+    ax1.set_xlabel('Class ID (Sorted by Image Count)',
+                   fontsize=12)  # ⭐ 加 X 軸標籤
+    ax1.set_ylabel('Number of Training Images',
+                   color='skyblue', fontsize=12)  # ⭐ 加 Y 軸標籤
+    ax1.set_xticks(range(num_classes))
+    ax1.set_xticklabels(sorted_idx, rotation=90,
+                        fontsize=7)  # ⭐ 顯示排序後的 Class ID
+
     ax2 = ax1.twinx()
-    ax2.plot(range(num_classes),
-             val_accs[sorted_idx], color='red', marker='o', markersize=4)
+    ax2.plot(range(num_classes), val_accs[sorted_idx],
+             color='red', marker='o', markersize=4, label='Val Accuracy')
+    ax2.set_ylabel('Validation Accuracy (%)',
+                   color='red', fontsize=12)  # ⭐ 加 Y 軸標籤
+
+    plt.title('Long Tail Accuracy Distribution', fontsize=14)
+    fig.tight_layout()
     plt.savefig(save_path)
     plt.close()
 
@@ -125,6 +144,12 @@ def plot_correlation_analysis(train_counts, error_rates, output_path="./Plot/cor
     plt.figure(figsize=(10, 7))
     plt.scatter(train_counts, error_rates, alpha=0.6, color='darkblue')
     z = np.polyfit(train_counts, error_rates, 1)
-    plt.plot(train_counts, np.poly1d(z)(train_counts), "r--")
+    plt.plot(train_counts, np.poly1d(z)(train_counts),
+             "r--", label=f'Trend (r={corr:.2f})')
+    plt.xlabel('Number of Training Images', fontsize=12)  # ⭐ 加 X 軸標籤
+    plt.ylabel('Error Rate (%)', fontsize=12)  # ⭐ 加 Y 軸標籤
+    plt.title(f'Correlation Analysis (Pearson r: {corr:.4f})', fontsize=14)
+    plt.legend()
+    plt.tight_layout()
     plt.savefig(output_path)
     plt.close()

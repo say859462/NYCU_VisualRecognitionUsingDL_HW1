@@ -19,7 +19,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     val_transform = transforms.Compose([
-        transforms.Resize(576), transforms.CenterCrop(512),
+        transforms.Resize(640), transforms.CenterCrop(576),
         transforms.ToTensor(), transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
 
