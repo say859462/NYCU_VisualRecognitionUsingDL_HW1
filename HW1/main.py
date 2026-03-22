@@ -1,4 +1,4 @@
-from utils import plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, LDAMLoss, get_cb_weights, RandomDiscreteRotation
+from utils import plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, get_cb_weights, SupConLoss
 from val import validate_one_epoch
 from train import train_one_epoch
 from model import ImageClassificationModel
@@ -8,10 +8,8 @@ import os
 import math
 import json
 import time
-import numpy as np
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
 import argparse
 from torch.utils.data import DataLoader
 from torchvision import transforms
@@ -41,20 +39,21 @@ def main():
     os.makedirs(os.path.dirname(CHECKPOINT_PATH), exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ⭐ 移除銳利化，加入 RandomErasing 來抹除「大拇指」等作弊特徵
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(512, scale=(0.5, 1.0)),
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomRotation(15),
+        transforms.RandomResizedCrop(448, scale=(0.3, 1.0)),
+        transforms.RandomHorizontalFlip(),
         transforms.ColorJitter(brightness=0.1, contrast=0.1),
+        transforms.RandomRotation(15),
+        transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225]),
-        transforms.RandomErasing(p=0.2, scale=(0.02, 0.2), ratio=(0.5, 2.0))
+        transforms.RandomErasing(p=0.25, scale=(0.02, 0.2))
     ])
 
     val_transform = transforms.Compose([
-        transforms.Resize(600), transforms.CenterCrop(512),
+        transforms.Resize(500),
+        transforms.CenterCrop(448),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])
@@ -73,39 +72,30 @@ def main():
     model = ImageClassificationModel(
         num_classes=NUM_CLASSES, pretrained=True).to(device)
 
-    head_params = [p for n, p in model.named_parameters() if any(
-        x in n for x in ['classifier', 'side2', 'side3', 'side4'])]
-    backbone_params = [p for n, p in model.named_parameters() if not any(
-        x in n for x in ['classifier', 'side2', 'side3', 'side4'])]
+    if not model.check_parameters():
+        print("The number of parameter is greater than 100,000,00!")
+        return
 
-    # ⭐ 降回標準 1e-4 的 Weight Decay
+    # 差分學習率 (解凍 Layer 2 必須用極小學習率)
+    backbone_l2 = [p for n, p in model.named_parameters(
+    ) if 'layer2' in n and p.requires_grad]
+    backbone_l3_l4 = [p for n, p in model.named_parameters() if (
+        'layer3' in n or 'layer4' in n) and p.requires_grad]
+    head_params = [p for n, p in model.named_parameters() if not any(
+        x in n for x in ['stem', 'layer1', 'layer2', 'layer3', 'layer4']) and p.requires_grad]
+
     optimizer = optim.AdamW([
-        {'params': backbone_params, 'lr': LR_BASE * 1.0},
-        {'params': head_params, 'lr': LR_BASE * 3.0},
+        {'params': backbone_l2, 'lr': LR_BASE * 0.1},
+        {'params': backbone_l3_l4, 'lr': LR_BASE * 1.0},
+        {'params': head_params, 'lr': LR_BASE * 1.5},
     ], weight_decay=3e-4)
 
-    # 1. 取得各類別的訓練圖片數量與 CB Weights
-    train_counts = np.bincount(train_dataset.targets, minlength=NUM_CLASSES)
     cb_weights = get_cb_weights(
-        train_dataset.targets, NUM_CLASSES, beta=0.999).to(device)
+        train_dataset.targets, num_classes=NUM_CLASSES).to(device)
 
-    criterion_ldam_clean = LDAMLoss(
-        cls_num_list=train_counts, max_m=0.5, s=30.0, weight=None).to(device)
+    criterion_supcon = SupConLoss(temperature=0.07).to(device)
 
-    criterion_ldam_drw = LDAMLoss(
-        cls_num_list=train_counts, max_m=0.5, s=30.0, weight=cb_weights).to(device)
-
-    class ScaledCrossEntropyLoss(nn.Module):
-        def __init__(self, s=30.0):
-            super().__init__()
-            self.s = s
-
-        def forward(self, inputs, targets):
-            # 在算 CE 前，把 [-1, 1] 放大回 [-30, 30]
-            return F.cross_entropy(inputs * self.s, targets)
-
-    criterion_val = ScaledCrossEntropyLoss(s=30.0).to(device)
-
+    criterion_val = nn.CrossEntropyLoss().to(device)
     from torch.optim.lr_scheduler import CosineAnnealingLR
 
     class WarmUpCosineAnnealingLR(torch.optim.lr_scheduler._LRScheduler):
@@ -125,8 +115,6 @@ def main():
     scheduler = WarmUpCosineAnnealingLR(
         optimizer, T_max=NUM_EPOCHS, warmup_epochs=5, eta_min=1e-6)
 
-    if not model.check_parameters():
-        return
     scaler = torch.amp.GradScaler('cuda')
 
     start_epoch, best_val_acc, best_val_loss, epochs_no_improve = 0, 0.0, float(
@@ -135,6 +123,7 @@ def main():
                'train_acc': [], 'val_acc': []}
     best_val_preds, best_val_labels = [], []
 
+    # ⭐ 補回 Checkpoint 讀取邏輯
     if RESUME_TRAINING and os.path.exists(CHECKPOINT_PATH):
         checkpoint = torch.load(
             CHECKPOINT_PATH, map_location=device, weights_only=False)
@@ -145,46 +134,46 @@ def main():
         start_epoch = checkpoint['epoch'] + 1
         best_val_acc = checkpoint['best_val_acc']
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-        history, epochs_no_improve = checkpoint['history'], checkpoint.get(
-            'epochs_no_improve', 0)
-        best_val_preds, best_val_labels = checkpoint.get(
-            'best_val_preds', []), checkpoint.get('best_val_labels', [])
+        history = checkpoint['history']
+        epochs_no_improve = checkpoint.get('epochs_no_improve', 0)
+        best_val_preds = checkpoint.get('best_val_preds', [])
+        best_val_labels = checkpoint.get('best_val_labels', [])
         print(
             f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch+1}.")
 
     training_start_time = time.time()
-    DRW_EPOCH = int(NUM_EPOCHS * 0.4)
     try:
         for epoch in range(start_epoch, NUM_EPOCHS):
             print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")
 
-            if epoch < DRW_EPOCH:
-                criterion_train = criterion_ldam_clean
-                if epoch == 0:
-                    print("🔵 Stage 1: LDAM Loss Activated (Focus on Margins)")
+            if epoch == NUM_EPOCHS // 2:
+                print("Focus on long-tail!!!")
+
+            if epoch < NUM_EPOCHS // 2:
+                # Stage 1: 基礎建立期，無差別學習泛用特徵
+                criterion_ce = nn.CrossEntropyLoss(
+                    label_smoothing=0.1).to(device)
             else:
-                criterion_train = criterion_ldam_drw
-                if epoch == DRW_EPOCH:
-                    print(
-                        "🔥 Stage 2: LDAM + DRW Weights Activated (Focus on Long-Tail)")
+                # Stage 2: 邊界雕刻期，加入 CB Weights 拯救長尾類別
+                criterion_ce = nn.CrossEntropyLoss(
+                    weight=cb_weights, label_smoothing=0.1).to(device)
 
-            # 傳入動態切換的 criterion_train
+            criterions = {'ce': criterion_ce, 'supcon': criterion_supcon}
+
             train_loss, train_acc = train_one_epoch(
-                model, train_loader, criterion_train, epoch+1, optimizer, device, scaler)
-
+                model, train_loader, criterions, epoch+1, optimizer, device, scaler)
             val_loss, val_acc, val_preds, val_labels = validate_one_epoch(
                 model, val_loader, criterion_val, device)
+
             scheduler.step()
             history['train_loss'].append(train_loss)
             history['train_acc'].append(train_acc)
             history['val_loss'].append(val_loss)
             history['val_acc'].append(val_acc)
 
+            # ⭐ 補上 Val Loss 的輸出
             print(
-                f"LR_Backbone: {optimizer.param_groups[0]['lr']:.6f} | LR_Head: {optimizer.param_groups[1]['lr']:.6f}")
-            print(
-                f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
-            print(f"Val Loss:   {val_loss:.4f} | Val Acc:   {val_acc:.2f}%")
+                f"LR: {optimizer.param_groups[1]['lr']:.6f} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
 
             if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss):
                 best_val_acc, best_val_loss, epochs_no_improve = val_acc, val_loss, 0
@@ -197,10 +186,18 @@ def main():
                 print(
                     f"No improvement. Early Stopping counter: {epochs_no_improve}/{EARLY_STOPPING_PATIENCE}")
 
+            # ⭐ 補回 Checkpoint 儲存邏輯 (每個 Epoch 結束都存檔)
             torch.save({
-                'epoch': epoch, 'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(), 'best_val_acc': best_val_acc, 'best_val_loss': best_val_loss,
-                'history': history, 'epochs_no_improve': epochs_no_improve, 'best_val_preds': best_val_preds, 'best_val_labels': best_val_labels,
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_val_acc': best_val_acc,
+                'best_val_loss': best_val_loss,
+                'history': history,
+                'epochs_no_improve': epochs_no_improve,
+                'best_val_preds': best_val_preds,
+                'best_val_labels': best_val_labels,
             }, CHECKPOINT_PATH)
 
             if epochs_no_improve >= EARLY_STOPPING_PATIENCE:
@@ -208,20 +205,38 @@ def main():
     except KeyboardInterrupt:
         print("\n" + "="*50 + "\nDetected Keyboard Interrupt.\n" + "="*50)
 
+    # 🕒 訓練結束，計算總耗時
     hours, rem = divmod(time.time() - training_start_time, 3600)
     minutes, seconds = divmod(rem, 60)
 
+    # 📊 繪製並保存分析圖表
+    PLOT_DIR = "./Plot"
+    os.makedirs(PLOT_DIR, exist_ok=True)
+
     if len(history['train_loss']) > 0:
+        print("\n📈 Generating analysis plots...")
         plot_training_curves(
-            history['train_loss'], history['val_loss'], history['train_acc'], history['val_acc'])
+            history['train_loss'], history['val_loss'],
+            history['train_acc'], history['val_acc'],
+            save_path=os.path.join(PLOT_DIR, "training_curves.png")
+        )
+
         if best_val_preds and best_val_labels:
-            plot_per_class_error(best_val_preds, best_val_labels,
-                                 num_classes=NUM_CLASSES, save_path="./Plot/error_dist.png")
-            plot_long_tail_accuracy(train_labels=train_dataset.targets, val_preds=best_val_preds,
-                                    val_labels=best_val_labels, num_classes=NUM_CLASSES, save_path="./Plot/long_tail_acc.png")
+            plot_per_class_error(
+                best_val_preds, best_val_labels,
+                num_classes=NUM_CLASSES,
+                save_path=os.path.join(PLOT_DIR, "error_dist.png")
+            )
+            plot_long_tail_accuracy(
+                train_labels=train_dataset.targets,
+                val_preds=best_val_preds,
+                val_labels=best_val_labels,
+                num_classes=NUM_CLASSES,
+                save_path=os.path.join(PLOT_DIR, "long_tail_acc.png")
+            )
 
     print(
-        f"\n Training Completed. Best Val Acc: {best_val_acc:.2f}% | Time: {int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}")
+        f"\n✅ Training Completed. Best Val Acc: {best_val_acc:.2f}% | Total Time: {int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}")
 
 
 if __name__ == "__main__":

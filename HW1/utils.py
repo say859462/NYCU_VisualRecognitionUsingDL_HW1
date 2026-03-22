@@ -7,11 +7,91 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from scipy.stats import pearsonr
 import torchvision.transforms.functional as TF
-
+import math
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+class SupConLoss(nn.Module):
+    """
+    Supervised Contrastive Learning Loss (單視角批次內版本)
+    專門解決極相似物種 (FGVC) 的特徵推擠，不設定硬性 Margin，而是透過溫度係數平滑拉開邊界。
+    """
+    def __init__(self, temperature=0.07):
+        super(SupConLoss, self).__init__()
+        self.temperature = temperature
+
+    def forward(self, features, labels):
+        # L2 正規化
+        features = F.normalize(features, p=2, dim=1)
+        batch_size = features.shape[0]
+        
+        labels = labels.contiguous().view(-1, 1)
+        mask = torch.eq(labels, labels.T).float().to(features.device)
+        
+        # 計算特徵相似度點積矩陣
+        anchor_dot_contrast = torch.div(torch.matmul(features, features.T), self.temperature)
+        
+        # 數值穩定性處理
+        logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
+        logits = anchor_dot_contrast - logits_max.detach()
+        
+        # 屏蔽對角線 (自己與自己的相似度不納入計算)
+        logits_mask = torch.scatter(
+            torch.ones_like(mask),
+            1,
+            torch.arange(batch_size).view(-1, 1).to(features.device),
+            0
+        )
+        mask = mask * logits_mask
+        
+        exp_logits = torch.exp(logits) * logits_mask
+        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-6)
+        
+        mask_sum = mask.sum(1)
+        mask_sum = torch.where(mask_sum == 0, torch.ones_like(mask_sum), mask_sum)
+        mean_log_prob_pos = (mask * log_prob).sum(1) / mask_sum
+        
+        return - mean_log_prob_pos.mean()
+class ArcFaceLoss(nn.Module):
+    def __init__(self, s=30.0, m=0.5, weight=None, label_smooth=0.05):
+        """
+        ArcFace Loss: 直接在餘弦空間施加角度 Margin，與 Cosine Classifier 完美契合。
+        :param s: 縮放因子 (Scale)，FGVC 通常設定 30.0
+        :param m: 角度邊距 (Angular Margin)，通常設定 0.5
+        :param weight: 類別權重 (用於 DRW 階段)
+        """
+        super(ArcFaceLoss, self).__init__()
+        self.s = s
+        self.m = m
+        self.weight = weight
+        self.cos_m = math.cos(m)
+        self.sin_m = math.sin(m)
+        self.label_smooth = label_smooth
+        # 安全閾值，防止數值不穩定
+        self.th = math.cos(math.pi - m)
+        self.mm = math.sin(math.pi - m) * m
+
+    def forward(self, cosine, label):
+        # 確保 cosine 在安全範圍內，避免 sqrt 產生 NaN
+        cosine = torch.clamp(cosine, -1.0 + 1e-7, 1.0 - 1e-7)
+        sine = torch.sqrt(1.0 - torch.pow(cosine, 2))
+
+        # cos(θ + m) = cosθ * cosm - sinθ * sinm
+        phi = cosine * self.cos_m - sine * self.sin_m
+
+        # 數值穩定性處理 (如果角度已經太大，則線性遞減)
+        phi = torch.where(cosine > self.th, phi, cosine - self.mm)
+
+        # 將 Margin 只加在正確答案 (Ground Truth) 對應的 Logit 上
+        one_hot = torch.zeros_like(cosine)
+        one_hot.scatter_(1, label.view(-1, 1).long(), 1)
+
+        output = (one_hot * phi) + ((1.0 - one_hot) * cosine)
+
+        # 乘上縮放因子 s，然後計算 Cross Entropy
+        return F.cross_entropy(output * self.s, label, weight=self.weight, label_smoothing=self.label_smooth)
 
 
 class LDAMLoss(nn.Module):

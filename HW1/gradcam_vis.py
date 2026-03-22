@@ -19,7 +19,7 @@ def main():
     parser.add_argument('--model_path', type=str,
                         default='./Model_Weight/best_model.pth')
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/GradCAM_Outputs/42th')
+                        default='./Plot/GradCAM_Outputs/45th')
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -30,11 +30,10 @@ def main():
     model.load_state_dict(torch.load(args.model_path, map_location=device))
     model.eval()
 
-    # ⭐ 因為 model 現在只回傳 logits，不需要 Wrapper 了！直接綁定！
-    cam = GradCAM(model=model, target_layers=[model.layer4[-1]])
+    cam = GradCAM(model=model, target_layers=[model.aff])
 
     preprocess_geo = transforms.Compose(
-        [transforms.Resize(600), transforms.CenterCrop(512)])
+        [transforms.Resize(500), transforms.CenterCrop(448)])
     preprocess_tensor = transforms.Compose([
         transforms.ToTensor(), transforms.Normalize(
             [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
@@ -65,8 +64,9 @@ def main():
 
             with torch.no_grad():
                 logits = model(input_tensor)
-                # ⭐ 修正：乘上 30.0 讓 Softmax 能正確運作
-                probs = torch.nn.functional.softmax(logits * 30.0, dim=1)[0]
+                # ⭐ 拔除溫度縮放
+                probs = torch.nn.functional.softmax(logits, dim=1)[0]
+
                 pred_class, pred_score = probs.argmax().item(), probs.max().item()
 
             grayscale_cam = cam(input_tensor=input_tensor, targets=None)[0, :]
@@ -82,7 +82,7 @@ def main():
             axes[0].set_title("Original")
             axes[1].imshow(vis)
             axes[1].axis('off')
-            axes[1].set_title("Res2Net Grad-CAM")
+            axes[1].set_title("ResNest Grad-CAM")
 
             plt.savefig(os.path.join(
                 class_save_dir, f"cam_{os.path.splitext(os.path.basename(img_path))[0]}.png"))
