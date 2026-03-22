@@ -19,7 +19,7 @@ def main():
     parser.add_argument('--model_path', type=str,
                         default='./Model_Weight/best_model.pth')
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/GradCAM_Outputs/45th')
+                        default='./Plot/GradCAM_Outputs/46th')
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -30,7 +30,7 @@ def main():
     model.load_state_dict(torch.load(args.model_path, map_location=device))
     model.eval()
 
-    cam = GradCAM(model=model, target_layers=[model.aff])
+    cam = GradCAM(model=model, target_layers=[model.cbp])
 
     preprocess_geo = transforms.Compose(
         [transforms.Resize(500), transforms.CenterCrop(448)])

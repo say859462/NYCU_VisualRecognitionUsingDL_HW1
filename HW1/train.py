@@ -21,16 +21,18 @@ def train_one_epoch(model, train_loader, criterions, epoch, optimizer, device, s
             # 獲取 Soft-PMG 的三個輔助頭與融合 Embedding
             out3, out4, out_fused, e_fused = model(images)
 
-            # 1. 深度監督：強迫淺層學會紋理，深層學會語義
+            use_supcon = criterions.get('use_supcon', True)
+
             loss3 = criterion_ce(out3, labels)
             loss4 = criterion_ce(out4, labels)
             loss_fused = criterion_ce(out_fused, labels)
 
-            # 2. 柔性對比：在 Embedding 空間推開相異物種
-            loss_supcon = criterion_supcon(e_fused, labels)
-
-            # 總損失加權 (核心融合層給予最高權重)
-            loss = loss3 + loss4 + 2.0 * loss_fused + 0.5 * loss_supcon
+            if use_supcon:
+                loss_supcon = criterions['supcon'](e_fused, labels)
+                loss = loss3 + loss4 + 2.0 * loss_fused + 0.5 * loss_supcon
+            else:
+                # cRT 階段：特徵已被凍結，專注更新分類頭的 CE Loss
+                loss = loss3 + loss4 + 2.0 * loss_fused
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)

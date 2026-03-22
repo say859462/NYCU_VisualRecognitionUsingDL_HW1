@@ -47,8 +47,7 @@ def main():
         transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
-                             0.229, 0.224, 0.225]),
-        transforms.RandomErasing(p=0.25, scale=(0.02, 0.2))
+                             0.229, 0.224, 0.225])
     ])
 
     val_transform = transforms.Compose([
@@ -92,11 +91,10 @@ def main():
 
     cb_weights = get_cb_weights(
         train_dataset.targets, num_classes=NUM_CLASSES).to(device)
-
     criterion_supcon = SupConLoss(temperature=0.07).to(device)
-
     criterion_val = nn.CrossEntropyLoss().to(device)
-    from torch.optim.lr_scheduler import CosineAnnealingLR
+
+    CRT_START_EPOCH = int(NUM_EPOCHS * 0.5)
 
     class WarmUpCosineAnnealingLR(torch.optim.lr_scheduler._LRScheduler):
         def __init__(self, optimizer, T_max, warmup_epochs=5, eta_min=1e-5, last_epoch=-1):
@@ -146,19 +144,29 @@ def main():
         for epoch in range(start_epoch, NUM_EPOCHS):
             print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")
 
-            if epoch == NUM_EPOCHS // 2:
-                print("Focus on long-tail!!!")
+            if epoch == CRT_START_EPOCH:
+                print("\n🚀 [GEAR SHIFT] 啟動 cRT 解耦訓練！凍結特徵提取器，專注校正長尾分類器！")
+                model.freeze_features_for_crt()
+                # 重新初始化 Optimizer，僅更新分類器，學習率給予較保守的值
+                optimizer = optim.AdamW(
+                    model.get_classifier_parameters(), lr=1e-4, weight_decay=1e-4)
+                # 為最後 10 個 Epoch 重新建立退火排程
+                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer, T_max=NUM_EPOCHS - CRT_START_EPOCH, eta_min=1e-6)
 
-            if epoch < NUM_EPOCHS // 2:
-                # Stage 1: 基礎建立期，無差別學習泛用特徵
+            if epoch < CRT_START_EPOCH:
+                # Stage 1: 建立純淨特徵，無權重 CE + 柔性 SupCon
                 criterion_ce = nn.CrossEntropyLoss(
                     label_smoothing=0.1).to(device)
+                criterions = {'ce': criterion_ce,
+                              'supcon': criterion_supcon, 'use_supcon': True}
             else:
-                # Stage 2: 邊界雕刻期，加入 CB Weights 拯救長尾類別
+                # Stage 2 (cRT): 凍結特徵後，套用長尾權重 (取消 Label Smoothing 讓邊界更清晰)
+                # 特徵已凍結，SupCon 計算已無意義，可關閉
                 criterion_ce = nn.CrossEntropyLoss(
-                    weight=cb_weights, label_smoothing=0.1).to(device)
-
-            criterions = {'ce': criterion_ce, 'supcon': criterion_supcon}
+                    weight=cb_weights, label_smoothing=0.0).to(device)
+                criterions = {'ce': criterion_ce,
+                              'supcon': None, 'use_supcon': False}
 
             train_loss, train_acc = train_one_epoch(
                 model, train_loader, criterions, epoch+1, optimizer, device, scaler)
@@ -171,9 +179,8 @@ def main():
             history['val_loss'].append(val_loss)
             history['val_acc'].append(val_acc)
 
-            # ⭐ 補上 Val Loss 的輸出
             print(
-                f"LR: {optimizer.param_groups[1]['lr']:.6f} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
+                f"LR: {optimizer.param_groups[-1]['lr']:.6f} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
 
             if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss):
                 best_val_acc, best_val_loss, epochs_no_improve = val_acc, val_loss, 0
