@@ -146,7 +146,7 @@ def main():
                'train_acc': [], 'val_acc': []}
     best_val_preds, best_val_labels = [], []
     
-    pk_phase_epochs = 8
+    pk_phase_epochs = 6
     
     supcon_weight = config.get('supcon_weight', 0.15)
 
