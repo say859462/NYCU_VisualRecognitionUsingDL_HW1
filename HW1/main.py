@@ -93,7 +93,10 @@ def main():
     resume_training = config['resume_training']
     checkpoint_path = config['checkpoint_path']
     best_model_path = config['best_model_path']
-
+    best_loss_model_path = config.get(
+        'best_loss_model_path',
+        './Model_Weight/best_loss_model.pth'
+    )
     # New experiment
     stage1_epochs = config.get('stage1_epochs', 24)
     num_subcenters = config.get('num_subcenters', 3)
@@ -182,8 +185,10 @@ def main():
 
     scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda')
 
-    start_epoch, best_val_acc, best_val_loss, epochs_no_improve = 0, 0.0, float(
-        'inf'), 0
+    start_epoch, epochs_no_improve = 0, 0
+    best_val_acc = 0.0
+    best_val_loss_for_acc = float('inf')   # 給 acc tie-break 用
+    best_val_loss_only = float('inf')      # 純 loss best
     history = {'train_loss': [], 'val_loss': [],
                'train_acc': [], 'val_acc': []}
     best_val_preds, best_val_labels = [], []
@@ -202,12 +207,13 @@ def main():
         model.load_state_dict(checkpoint['model_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         best_val_acc = checkpoint['best_val_acc']
-        best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         history = checkpoint['history']
         epochs_no_improve = checkpoint.get('epochs_no_improve', 0)
         best_val_preds = checkpoint.get('best_val_preds', [])
         best_val_labels = checkpoint.get('best_val_labels', [])
-
+        best_val_loss_for_acc = checkpoint.get(
+            'best_val_loss_for_acc', float('inf'))
+        best_val_loss_only = checkpoint.get('best_val_loss_only', float('inf'))
         resume_stage = get_stage(start_epoch, stage1_epochs)
         model.set_train_stage(resume_stage)
         optimizer = build_optimizer(model, lr_base, resume_stage)
@@ -281,17 +287,25 @@ def main():
                 f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
                 f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%"
             )
-
-            if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss):
-                best_val_acc, best_val_loss, epochs_no_improve = val_acc, val_loss, 0
-                best_val_preds, best_val_labels = val_preds, val_labels
+            # --- ACC best ---
+            if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss_for_acc):
+                best_val_acc = val_acc
+                best_val_loss_for_acc = val_loss
+                epochs_no_improve = 0
+                best_val_preds = val_preds
+                best_val_labels = val_labels
                 torch.save(model.state_dict(), best_model_path)
-                print(
-                    f"🌟 Found a better model! Updated {best_model_path} ({best_val_acc:.2f}%)")
+                print(f"🌟 Best ACC model saved ({best_val_acc:.2f}%)")
+
             else:
                 epochs_no_improve += 1
-                print(
-                    f"No improvement. Early Stopping counter: {epochs_no_improve}/{early_stopping_patience}")
+
+            # --- LOSS best ---
+            if val_loss < best_val_loss_only:
+                best_val_loss_only = val_loss
+
+                torch.save(model.state_dict(), best_loss_model_path)
+                print(f"💡 Best LOSS model saved ({best_val_loss_only:.4f})")
 
             torch.save({
                 'epoch': epoch,
@@ -300,7 +314,8 @@ def main():
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_acc': best_val_acc,
-                'best_val_loss': best_val_loss,
+                'best_val_loss_for_acc': best_val_loss_for_acc,
+                'best_val_loss_only': best_val_loss_only,
                 'history': history,
                 'epochs_no_improve': epochs_no_improve,
                 'best_val_preds': best_val_preds,
