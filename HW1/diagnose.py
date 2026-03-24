@@ -17,46 +17,68 @@ from model import ImageClassificationModel
 
 def get_embeddings_preds_labels_paths(model, dataloader, device, image_paths):
     """
-    直接提取 fused embedding、prediction、label、confidence、image path
-    優先使用 model.forward_features()，避免 hook 失敗或不穩定。
+    提取：
+    - embedding
+    - class logits
+    - all subcenter logits
+    - prediction
+    - label
+    - confidence
+    - assigned subcenter
     """
     model.eval()
 
     all_embeddings = []
     all_logits = []
+    all_logits_all = []
     all_preds = []
     all_labels = []
 
     with torch.no_grad():
-        start_idx = 0
         for images, labels in tqdm(dataloader, desc="Extracting Features", colour="cyan"):
             images = images.to(device)
 
-            if hasattr(model, "forward_features"):
-                embeddings, _ = model.forward_features(images)
-                logits = model.classifier(embeddings)
-            else:
-                logits = model(images)
-                embeddings = logits  # fallback，不理想但至少可跑
+            pooled, _ = model.forward_features(images)
+            logits, embed, logits_all = model.forward_head(pooled)
+            # logits: [B, C]
+            # embed: [B, D]
+            # logits_all: [B, C, K]
 
             preds = torch.argmax(logits, dim=1)
 
-            all_embeddings.append(embeddings.cpu().numpy())
+            all_embeddings.append(embed.cpu().numpy())
             all_logits.append(logits.cpu().numpy())
+            all_logits_all.append(logits_all.cpu().numpy())
             all_preds.append(preds.cpu().numpy())
             all_labels.append(labels.numpy())
 
-            start_idx += len(labels)
-
     embeddings = np.concatenate(all_embeddings, axis=0)
     logits = np.concatenate(all_logits, axis=0)
+    logits_all = np.concatenate(all_logits_all, axis=0)
     preds = np.concatenate(all_preds, axis=0)
     labels = np.concatenate(all_labels, axis=0)
 
     probs = torch.softmax(torch.tensor(logits), dim=1).numpy()
     confs = probs.max(axis=1)
 
-    return embeddings, logits, probs, preds, labels, confs, image_paths
+    assigned_subcenters = []
+    for i in range(len(preds)):
+        pred_cls = preds[i]
+        sub_idx = int(np.argmax(logits_all[i, pred_cls]))
+        assigned_subcenters.append(sub_idx)
+    assigned_subcenters = np.array(assigned_subcenters)
+
+    return (
+        embeddings,
+        logits,
+        logits_all,
+        probs,
+        preds,
+        labels,
+        confs,
+        assigned_subcenters,
+        image_paths
+    )
 
 
 def plot_global_confusion_matrix(y_true, y_pred, num_classes, save_path):
@@ -165,10 +187,72 @@ def export_hardest_mistakes(image_paths, labels, preds, confs, probs, save_csv_p
     return df
 
 
+def export_subcenter_assignments(
+    image_paths,
+    labels,
+    preds,
+    confs,
+    assigned_subcenters,
+    save_csv_path
+):
+    rows = []
+    for path, y, p, conf, sub in zip(
+        image_paths, labels, preds, confs, assigned_subcenters
+    ):
+        rows.append({
+            "Image_Path": path,
+            "True_Class": int(y),
+            "Pred_Class": int(p),
+            "Pred_Confidence": float(conf),
+            "Assigned_Subcenter": int(sub)
+        })
+
+    df = pd.DataFrame(rows)
+    df.to_csv(save_csv_path, index=False)
+    print(f"🧩 Saved subcenter assignments -> {save_csv_path}")
+    return df
+
+
+def build_subcenter_summary(labels, preds, assigned_subcenters, save_csv_path):
+    """
+    只看 prediction correct 的樣本，
+    分析每個 class 內部不同 subcenter 各自吸了多少資料。
+    """
+    rows = []
+
+    labels = np.array(labels)
+    preds = np.array(preds)
+    assigned_subcenters = np.array(assigned_subcenters)
+
+    correct_mask = (labels == preds)
+
+    unique_classes = np.unique(labels)
+    for cls in unique_classes:
+        cls_mask = (labels == cls) & correct_mask
+        if cls_mask.sum() == 0:
+            continue
+
+        sub_ids, counts = np.unique(
+            assigned_subcenters[cls_mask], return_counts=True)
+        total = int(cls_mask.sum())
+
+        for sub_id, cnt in zip(sub_ids, counts):
+            rows.append({
+                "Class_ID": int(cls),
+                "Subcenter_ID": int(sub_id),
+                "Correct_Assigned_Count": int(cnt),
+                "Ratio_in_Class(%)": round(cnt / total * 100.0, 2)
+            })
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values(
+        by=["Class_ID", "Correct_Assigned_Count"], ascending=[True, False])
+    df.to_csv(save_csv_path, index=False)
+    print(f"📄 Saved subcenter summary -> {save_csv_path}")
+    return df
+
+
 def get_top_confused_class_set(confused_df, max_classes=12):
-    """
-    從 top confused pairs 自動整理出最值得觀察的 class set
-    """
     if confused_df is None or len(confused_df) == 0:
         return []
 
@@ -265,12 +349,66 @@ def plot_tsne(embeddings, labels, target_classes, save_path):
     print(f"🌌 Saved t-SNE -> {save_path}")
 
 
+def plot_tsne_by_subcenter(embeddings, labels, assigned_subcenters, target_class, save_path):
+    """
+    只看單一 class，依 subcenter 著色
+    """
+    mask = (labels == target_class)
+    feat_subset = embeddings[mask]
+    sub_subset = assigned_subcenters[mask]
+
+    if len(feat_subset) < 5:
+        print(f"Not enough samples for class {target_class} t-SNE.")
+        return
+
+    perplexity = min(30, max(5, len(feat_subset) - 1))
+    print(
+        f"Running class-{target_class} subcenter t-SNE on {len(feat_subset)} samples...")
+
+    tsne = TSNE(
+        n_components=2,
+        perplexity=perplexity,
+        random_state=42,
+        init='pca',
+        learning_rate='auto'
+    )
+    embed_2d = tsne.fit_transform(feat_subset)
+
+    plt.figure(figsize=(10, 8))
+    unique_subs = np.unique(sub_subset)
+    colors = plt.cm.Set2(np.linspace(0, 1, len(unique_subs)))
+
+    for i, sub_id in enumerate(unique_subs):
+        sub_mask = (sub_subset == sub_id)
+        plt.scatter(
+            embed_2d[sub_mask, 0],
+            embed_2d[sub_mask, 1],
+            label=f"Subcenter {sub_id}",
+            color=colors[i],
+            alpha=0.8,
+            s=55,
+            edgecolors='w'
+        )
+
+    plt.legend()
+    plt.title(f"t-SNE of Class {target_class} by Subcenter",
+              fontsize=15, fontweight='bold')
+    plt.grid(True, linestyle='--', alpha=0.4)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+    print(f"🌌 Saved class-{target_class} subcenter t-SNE -> {save_path}")
+
+
 def main():
-    MODEL_PATH = "./Model_Weight/52th/best_model.pth"
+    MODEL_PATH = "./Model_Weight/best_model.pth"
     DATA_DIR = "./Dataset/data"
-    OUTPUT_DIR = "./Plot/EXP53_Diagnostic"
+    OUTPUT_DIR = "./Plot/Subcenter_Diagnostic_55th"
     NUM_CLASSES = 100
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 你可以手動指定要觀察的 class
+    TARGET_SUBCENTER_TSNE_CLASSES = [2, 6, 20, 44, 45, 76, 88]
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     print(f"Device: {DEVICE}")
@@ -299,16 +437,31 @@ def main():
     )
 
     model = ImageClassificationModel(
-        num_classes=NUM_CLASSES, pretrained=False).to(DEVICE)
+        num_classes=NUM_CLASSES,
+        pretrained=False,
+        num_subcenters=3,
+        embed_dim=256
+    ).to(DEVICE)
 
     if not os.path.exists(MODEL_PATH):
         print(f"❌ Model weight not found: {MODEL_PATH}")
         return
 
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+    state = torch.load(MODEL_PATH, map_location=DEVICE)
+    model.load_state_dict(state)
     print(f"✅ Loaded model from: {MODEL_PATH}")
 
-    embeddings, logits, probs, preds, labels, confs, image_paths = get_embeddings_preds_labels_paths(
+    (
+        embeddings,
+        logits,
+        logits_all,
+        probs,
+        preds,
+        labels,
+        confs,
+        assigned_subcenters,
+        image_paths
+    ) = get_embeddings_preds_labels_paths(
         model,
         val_loader,
         DEVICE,
@@ -344,7 +497,25 @@ def main():
         top_k=100
     )
 
-    # 4) global confusion matrix
+    # 4) 每張圖的 subcenter assignment
+    subcenter_assign_df = export_subcenter_assignments(
+        image_paths=image_paths,
+        labels=labels,
+        preds=preds,
+        confs=confs,
+        assigned_subcenters=assigned_subcenters,
+        save_csv_path=os.path.join(OUTPUT_DIR, "subcenter_assignments.csv")
+    )
+
+    # 5) 每個 class 內，各 subcenter 吸了多少正確樣本
+    subcenter_summary_df = build_subcenter_summary(
+        labels=labels,
+        preds=preds,
+        assigned_subcenters=assigned_subcenters,
+        save_csv_path=os.path.join(OUTPUT_DIR, "subcenter_summary.csv")
+    )
+
+    # 6) global confusion matrix
     plot_global_confusion_matrix(
         labels,
         preds,
@@ -352,11 +523,11 @@ def main():
         save_path=os.path.join(OUTPUT_DIR, "cm_global.png")
     )
 
-    # 5) auto target classes from top confused pairs
+    # 7) auto target classes from confused pairs
     target_classes = get_top_confused_class_set(confused_df, max_classes=12)
     print(f"🎯 Auto selected target classes: {target_classes}")
 
-    # 6) local confusion matrix
+    # 8) local confusion matrix
     plot_local_confusion_matrix(
         labels,
         preds,
@@ -364,7 +535,7 @@ def main():
         save_path=os.path.join(OUTPUT_DIR, "cm_top_confused_classes.png")
     )
 
-    # 7) tsne
+    # 9) t-SNE of confused classes
     plot_tsne(
         embeddings,
         labels,
@@ -372,14 +543,28 @@ def main():
         save_path=os.path.join(OUTPUT_DIR, "tsne_top_confused_classes.png")
     )
 
+    # 10) class-wise t-SNE by subcenter
+    for cls in TARGET_SUBCENTER_TSNE_CLASSES:
+        plot_tsne_by_subcenter(
+            embeddings=embeddings,
+            labels=labels,
+            assigned_subcenters=assigned_subcenters,
+            target_class=cls,
+            save_path=os.path.join(
+                OUTPUT_DIR, f"tsne_class_{cls}_subcenters.png")
+        )
+
     print("\n✅ Analysis complete.")
     print("Generated files:")
     print("- top_confused_pairs.csv")
     print("- per_class_summary.csv")
     print("- hardest_mistakes.csv")
+    print("- subcenter_assignments.csv")
+    print("- subcenter_summary.csv")
     print("- cm_global.png")
     print("- cm_top_confused_classes.png")
     print("- tsne_top_confused_classes.png")
+    print("- tsne_class_<id>_subcenters.png")
 
 
 if __name__ == "__main__":

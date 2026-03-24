@@ -94,10 +94,12 @@ def main():
     checkpoint_path = config['checkpoint_path']
     best_model_path = config['best_model_path']
 
-    # New design: longer stage-1 representation learning, short stage-2 calibration
+    # New experiment
     stage1_epochs = config.get('stage1_epochs', 24)
-    alpha_mid = config.get('distill_alpha_mid', 0.10)
-    distill_temperature = config.get('distill_temperature', 1.0)
+    num_subcenters = config.get('num_subcenters', 3)
+    embed_dim = config.get('embed_dim', 256)
+    bg_aux_weight = config.get('bg_aux_weight', 0.20)
+    proto_div_weight = config.get('proto_div_weight', 0.01)
 
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -140,7 +142,6 @@ def main():
     val_dataset = ImageDataset(
         root_dir=data_dir, split="val", transform=val_transform)
 
-    # Natural distribution for both stages
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -160,7 +161,12 @@ def main():
     )
 
     model = ImageClassificationModel(
-        num_classes=num_classes, pretrained=True).to(device)
+        num_classes=num_classes,
+        pretrained=True,
+        num_subcenters=num_subcenters,
+        embed_dim=embed_dim
+    ).to(device)
+
     if not model.check_parameters():
         print("The number of parameter is greater than 100,000,000!")
         return
@@ -176,10 +182,8 @@ def main():
 
     scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda')
 
-    start_epoch, best_val_acc, best_val_loss, epochs_no_improve = 0, 0.0, float(
-        'inf'), 0
-    history = {'train_loss': [], 'val_loss': [],
-               'train_acc': [], 'val_acc': []}
+    start_epoch, best_val_acc, best_val_loss, epochs_no_improve = 0, 0.0, float('inf'), 0
+    history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
     best_val_preds, best_val_labels = [], []
 
     initial_stage = get_stage(start_epoch, stage1_epochs)
@@ -215,8 +219,7 @@ def main():
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             active_stage = resume_stage
 
-        print(
-            f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch+1}.")
+        print(f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch+1}.")
 
     training_start_time = time.time()
 
@@ -231,17 +234,17 @@ def main():
                     optimizer, stage, stage1_epochs, num_epochs)
                 print(
                     f"\n🔄 Switching to Stage {stage}: "
-                    f"{'CE + random-view feature distillation' if stage == 1 else 'short classifier calibration + Balanced Softmax'}"
+                    f"{'CE + light background suppression + prototype regularization' if stage == 1 else 'short classifier calibration + Balanced Softmax'}"
                 )
                 active_stage = stage
 
             criterion_train = criterion_stage1 if stage == 1 else criterion_stage2
-            use_multiview_distill = (stage == 1)
+            use_bg_suppression = (stage == 1)
 
             print(f"\n--- Epoch {epoch+1}/{num_epochs} ---")
             print(
                 f"Stage {stage} | "
-                f"{'shuffle + CE + random-view feature distillation' if stage == 1 else 'shuffle + Balanced Softmax'}"
+                f"{'shuffle + CE + background suppression aux + multi-prototype head' if stage == 1 else 'shuffle + Balanced Softmax'}"
             )
 
             train_loss, train_acc = train_one_epoch(
@@ -253,9 +256,9 @@ def main():
                 device=device,
                 scaler=scaler,
                 stage=stage,
-                use_multiview_distill=use_multiview_distill,
-                alpha_mid=alpha_mid,
-                distill_temperature=distill_temperature
+                use_bg_suppression=use_bg_suppression,
+                bg_aux_weight=bg_aux_weight,
+                proto_div_weight=proto_div_weight,
             )
 
             val_loss, val_acc, val_preds, val_labels = validate_one_epoch(
@@ -278,12 +281,10 @@ def main():
                 best_val_acc, best_val_loss, epochs_no_improve = val_acc, val_loss, 0
                 best_val_preds, best_val_labels = val_preds, val_labels
                 torch.save(model.state_dict(), best_model_path)
-                print(
-                    f"🌟 Found a better model! Updated {best_model_path} ({best_val_acc:.2f}%)")
+                print(f"🌟 Found a better model! Updated {best_model_path} ({best_val_acc:.2f}%)")
             else:
                 epochs_no_improve += 1
-                print(
-                    f"No improvement. Early Stopping counter: {epochs_no_improve}/{early_stopping_patience}")
+                print(f"No improvement. Early Stopping counter: {epochs_no_improve}/{early_stopping_patience}")
 
             torch.save({
                 'epoch': epoch,

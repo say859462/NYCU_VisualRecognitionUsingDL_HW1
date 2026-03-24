@@ -60,7 +60,8 @@ class PKSampler(Sampler):
 class BalancedSoftmaxLoss(nn.Module):
     def __init__(self, sample_per_class):
         super().__init__()
-        sample_per_class = torch.as_tensor(sample_per_class, dtype=torch.float32)
+        sample_per_class = torch.as_tensor(
+            sample_per_class, dtype=torch.float32)
         self.register_buffer(
             "log_prior",
             torch.log(sample_per_class.clamp(min=1.0)).view(1, -1)
@@ -71,53 +72,48 @@ class BalancedSoftmaxLoss(nn.Module):
         return F.cross_entropy(balanced_logits, targets)
 
 
-def make_random_resized_views(images, scale_range=(0.6, 0.9), out_size=None):
+def make_background_suppressed_views(
+    images,
+    saliency_maps,
+    threshold_ratio=0.45,
+    suppress_strength=0.35,
+    blur_kernel=7
+):
     """
-    Create random resized views directly from a tensor batch.
-    Each sample is cropped with an independent random box and resized back.
+    輕量 background suppression:
+    - salient region 保留
+    - 低 saliency 區域做 blur + dim
     """
     b, c, h, w = images.shape
-    if out_size is None:
-        out_size = (h, w)
+    device = images.device
 
-    views = []
-    min_scale, max_scale = scale_range
-    for i in range(b):
-        scale = random.uniform(min_scale, max_scale)
-        crop_h = max(1, int(h * scale))
-        crop_w = max(1, int(w * scale))
+    if saliency_maps.dim() == 3:
+        saliency_maps = saliency_maps.unsqueeze(1)
 
-        if crop_h >= h:
-            top = 0
-            crop_h = h
-        else:
-            top = random.randint(0, h - crop_h)
+    saliency_maps = F.interpolate(
+        saliency_maps,
+        size=(h, w),
+        mode="bilinear",
+        align_corners=False
+    )
 
-        if crop_w >= w:
-            left = 0
-            crop_w = w
-        else:
-            left = random.randint(0, w - crop_w)
+    # per-sample normalize
+    sal = saliency_maps
+    sal = sal - sal.amin(dim=(2, 3), keepdim=True)
+    sal = sal / (sal.amax(dim=(2, 3), keepdim=True) + 1e-8)
 
-        crop = images[i:i+1, :, top:top + crop_h, left:left + crop_w]
-        crop = F.interpolate(crop, size=out_size, mode="bilinear", align_corners=False)
-        views.append(crop)
+    fg_mask = (sal >= threshold_ratio).float()
+    bg_mask = 1.0 - fg_mask
 
-    return torch.cat(views, dim=0)
+    # simple blur
+    pad = blur_kernel // 2
+    blurred = F.avg_pool2d(
+        images, kernel_size=blur_kernel, stride=1, padding=pad)
 
-
-def feature_distribution_kl(student_feat, teacher_feat, temperature=1.0):
-    """
-    Feature-level self-distillation.
-    Normalize across feature dimension and compute KL(student || teacher).
-    Teacher is detached externally or within this function.
-    """
-    teacher_feat = teacher_feat.detach()
-
-    student_log_prob = F.log_softmax(student_feat / temperature, dim=1)
-    teacher_prob = F.softmax(teacher_feat / temperature, dim=1)
-    kl = F.kl_div(student_log_prob, teacher_prob, reduction="batchmean")
-    return kl * (temperature ** 2)
+    suppressed_bg = (1.0 - suppress_strength) * \
+        images + suppress_strength * blurred
+    out = images * fg_mask + suppressed_bg * bg_mask
+    return out.to(device)
 
 
 def plot_class_distribution(data_dir, title="Dataset Class Distribution", output_path="./Figures"):
@@ -140,27 +136,66 @@ def plot_class_distribution(data_dir, title="Dataset Class Distribution", output
 
 def plot_training_curves(train_losses, val_losses, train_accs, val_accs, save_path="./Plot/training_curves.png"):
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    epochs = range(1, len(train_losses) + 1)
+    epochs = list(range(1, len(train_losses) + 1))
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
+    # ==========================================
+    # 1. 繪製 Loss 曲線並標示最低 Val Loss
+    # ==========================================
     ax1.plot(epochs, train_losses, 'b-', label='Train Loss')
     ax1.plot(epochs, val_losses, 'r-', label='Val Loss')
+
+    # 尋找極值與對應的 Epoch (索引從 0 開始，所以要 +1)
+    min_val_loss = min(val_losses)
+    min_loss_epoch = val_losses.index(min_val_loss) + 1
+
+    # 畫出醒目的星星標記
+    ax1.scatter(min_loss_epoch, min_val_loss, color='gold',
+                edgecolor='red', s=200, marker='*', zorder=5)
+    # 加上帶有箭頭的註解方塊 (放在點的上方)
+    ax1.annotate(f'Best Loss: {min_val_loss:.4f}\n(Epoch {min_loss_epoch})',
+                 xy=(min_loss_epoch, min_val_loss),
+                 xytext=(0, 25), textcoords='offset points',
+                 ha='center', va='bottom', fontsize=10, fontweight='bold',
+                 bbox=dict(boxstyle='round,pad=0.4',
+                           fc='lightyellow', alpha=0.8),
+                 arrowprops=dict(arrowstyle='->', color='black', lw=1.5))
+
     ax1.set_xlabel('Epoch', fontsize=12)
     ax1.set_ylabel('Loss', fontsize=12)
     ax1.legend()
     ax1.set_title('Training and Validation Loss', fontsize=14)
 
+    # ==========================================
+    # 2. 繪製 Accuracy 曲線並標示最高 Val Acc
+    # ==========================================
     ax2.plot(epochs, train_accs, 'b-', label='Train Acc')
     ax2.plot(epochs, val_accs, 'r-', label='Val Acc')
+
+    # 尋找極值與對應的 Epoch
+    max_val_acc = max(val_accs)
+    max_acc_epoch = val_accs.index(max_val_acc) + 1
+
+    # 畫出醒目的星星標記
+    ax2.scatter(max_acc_epoch, max_val_acc, color='gold',
+                edgecolor='red', s=200, marker='*', zorder=5)
+    # 加上帶有箭頭的註解方塊 (放在點的下方，避免超出圖表頂部)
+    ax2.annotate(f'Best Acc: {max_val_acc:.2f}%\n(Epoch {max_acc_epoch})',
+                 xy=(max_acc_epoch, max_val_acc),
+                 xytext=(0, -35), textcoords='offset points',
+                 ha='center', va='top', fontsize=10, fontweight='bold',
+                 bbox=dict(boxstyle='round,pad=0.4',
+                           fc='lightyellow', alpha=0.8),
+                 arrowprops=dict(arrowstyle='->', color='black', lw=1.5))
+
     ax2.set_xlabel('Epoch', fontsize=12)
     ax2.set_ylabel('Accuracy (%)', fontsize=12)
     ax2.legend()
     ax2.set_title('Training and Validation Accuracy', fontsize=14)
 
     plt.tight_layout()
-    plt.savefig(save_path)
+    plt.savefig(save_path, dpi=300)  # 加入 dpi=300 讓輸出的圖表更加清晰高畫質
     plt.close()
-
 
 
 def plot_per_class_error(all_preds, all_labels, num_classes=100, save_path="./Plot/class_error_dist.png"):
@@ -182,7 +217,6 @@ def plot_per_class_error(all_preds, all_labels, num_classes=100, save_path="./Pl
     plt.savefig(save_path)
     plt.close()
     return error_rates
-
 
 
 def plot_long_tail_accuracy(train_labels, val_preds, val_labels, num_classes=100, save_path="./Plot/long_tail_acc.png"):
@@ -210,7 +244,6 @@ def plot_long_tail_accuracy(train_labels, val_preds, val_labels, num_classes=100
     fig.tight_layout()
     plt.savefig(save_path)
     plt.close()
-
 
 
 def plot_correlation_analysis(train_counts, error_rates, output_path="./Plot/correlation_analysis.png"):

@@ -19,7 +19,7 @@ def main():
     parser.add_argument('--model_path', type=str,
                         default='./Model_Weight/best_model.pth')
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/Attention_Outputs/53th')  # ⭐ 建議改名
+                        default='./Plot/Attention_Outputs/55th')  # ⭐ 建議改名
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -71,7 +71,7 @@ def main():
 
                 raw_saliency = raw_saliency.unsqueeze(1)
                 upsampled_saliency = F.interpolate(
-                    raw_saliency, size=(512, 512), mode='bilinear', align_corners=False
+                    raw_saliency, size=(448, 448), mode='bilinear', align_corners=False
                 )
 
             # 轉換為 Numpy 並進行 Min-Max 正規化至 0~1

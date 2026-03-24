@@ -20,15 +20,60 @@ class GeM(nn.Module):
         return x.flatten(1)
 
 
+class SubCenterClassifier(nn.Module):
+    """
+    Multi-prototype classifier:
+    每個 class 有 K 個 sub-centers，logit 取 max over sub-centers
+    """
+    def __init__(self, in_features, num_classes, num_subcenters=3, scale=16.0, learn_scale=True):
+        super().__init__()
+        self.in_features = in_features
+        self.num_classes = num_classes
+        self.num_subcenters = num_subcenters
+
+        self.weight = nn.Parameter(
+            torch.randn(num_classes, num_subcenters, in_features)
+        )
+
+        if learn_scale:
+            self.scale = nn.Parameter(torch.tensor(float(scale)))
+        else:
+            self.register_buffer("scale", torch.tensor(float(scale)))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.normal_(self.weight, mean=0.0, std=0.01)
+
+    def forward(self, x):
+        # x: [B, D]
+        x = F.normalize(x, dim=1)
+        w = F.normalize(self.weight, dim=2)  # [C, K, D]
+
+        # logits_all: [B, C, K]
+        logits_all = torch.einsum("bd,ckd->bck", x, w)
+        logits_all = logits_all * self.scale.clamp(min=1.0)
+
+        # class logits: max over sub-centers
+        class_logits, _ = logits_all.max(dim=2)
+        return class_logits, logits_all
+
+
 class ImageClassificationModel(nn.Module):
-    def __init__(self, num_classes=100, pretrained=True):
+    def __init__(
+        self,
+        num_classes=100,
+        pretrained=True,
+        num_subcenters=3,
+        embed_dim=256
+    ):
         super().__init__()
 
         resnet = models.resnet152(
             weights=models.ResNet152_Weights.DEFAULT if pretrained else None
         )
 
-        # Pretrained backbone
+        # Backbone
         self.stem = nn.Sequential(
             resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool
         )
@@ -37,7 +82,7 @@ class ImageClassificationModel(nn.Module):
         self.layer3 = resnet.layer3
         self.layer4 = resnet.layer4
 
-        # New layers
+        # L3/L4 fusion
         self.proj_l3 = nn.Sequential(
             nn.Conv2d(1024, 256, kernel_size=1, bias=False),
             nn.BatchNorm2d(256),
@@ -55,12 +100,27 @@ class ImageClassificationModel(nn.Module):
         )
 
         self.pool = GeM(p=3.0, learn_p=True)
-        self.dropout = nn.Dropout(p=0.2)
-        self.classifier = nn.Linear(512, num_classes)
+
+        # Light bottleneck
+        self.embedding = nn.Sequential(
+            nn.Linear(512, embed_dim),
+            nn.BatchNorm1d(embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=0.2),
+        )
+
+        # Multi-prototype classifier
+        self.classifier = SubCenterClassifier(
+            in_features=embed_dim,
+            num_classes=num_classes,
+            num_subcenters=num_subcenters,
+            scale=16.0,
+            learn_scale=True
+        )
 
         self._freeze_shallow_layers()
         self.set_train_stage(1)
-        self._init_new_layers()  # 只初始化新加的層，不動 pretrained backbone
+        self._init_new_layers()
 
     def _freeze_shallow_layers(self):
         for module in [self.stem, self.layer1]:
@@ -80,13 +140,19 @@ class ImageClassificationModel(nn.Module):
         for param in self.layer4.parameters():
             param.requires_grad = True
 
-        for module in [self.proj_l3, self.proj_l4, self.fuse, self.pool, self.classifier]:
+        for module in [
+            self.proj_l3, self.proj_l4, self.fuse,
+            self.pool, self.embedding, self.classifier
+        ]:
             for param in module.parameters():
                 param.requires_grad = True
 
     def _head_parameters(self):
         params = []
-        for module in [self.proj_l3, self.proj_l4, self.fuse, self.pool, self.classifier]:
+        for module in [
+            self.proj_l3, self.proj_l4, self.fuse,
+            self.pool, self.embedding, self.classifier
+        ]:
             params.extend([p for p in module.parameters() if p.requires_grad])
         return params
 
@@ -129,23 +195,26 @@ class ImageClassificationModel(nn.Module):
         x = self.layer1(x)
         x = self.layer2(x)
 
-        feat_l3 = self.layer3(x)          # [B, 1024, H, W]
-        feat_l4 = self.layer4(feat_l3)    # [B, 2048, H/2, W/2] typically
+        feat_l3 = self.layer3(x)
+        feat_l4 = self.layer4(feat_l3)
 
-        feat_l3 = self.proj_l3(feat_l3)   # [B, 256, ...]
-        feat_l4 = self.proj_l4(feat_l4)   # [B, 256, ...]
-
-        # Align layer3 to layer4 resolution
+        feat_l3 = self.proj_l3(feat_l3)
+        feat_l4 = self.proj_l4(feat_l4)
         feat_l3 = F.adaptive_avg_pool2d(feat_l3, feat_l4.shape[-2:])
 
-        fused_map = self.fuse(torch.cat([feat_l3, feat_l4], dim=1))  # [B, 512, ...]
+        fused_map = self.fuse(torch.cat([feat_l3, feat_l4], dim=1))
         pooled = self.pool(fused_map)
-        pooled = self.dropout(pooled)
         return pooled, fused_map
+
+    def forward_head(self, pooled):
+        embed = self.embedding(pooled)
+        logits, logits_all = self.classifier(embed)
+        return logits, embed, logits_all
 
     def forward(self, x):
         pooled, _ = self.forward_features(x)
-        return self.classifier(pooled)
+        logits, _, _ = self.forward_head(pooled)
+        return logits
 
     def get_saliency(self, x):
         is_training = self.training
@@ -156,16 +225,32 @@ class ImageClassificationModel(nn.Module):
         self.train(is_training)
         return saliency
 
+    def prototype_diversity_loss(self, margin=0.2):
+        """
+        Encourage different sub-centers of the same class
+        not to collapse into one prototype.
+        """
+        w = F.normalize(self.classifier.weight, dim=2)  # [C, K, D]
+        c, k, d = w.shape
+        if k <= 1:
+            return torch.tensor(0.0, device=w.device)
+
+        loss = 0.0
+        count = 0
+        for i in range(k):
+            for j in range(i + 1, k):
+                sim = (w[:, i, :] * w[:, j, :]).sum(dim=1)  # [C]
+                loss = loss + F.relu(sim - margin).mean()
+                count += 1
+
+        return loss / max(count, 1)
+
     def _init_new_layers(self):
-        """
-        只初始化新加的 head / projection / fusion layers。
-        絕對不要重設 pretrained backbone。
-        """
         modules_to_init = [
             self.proj_l3,
             self.proj_l4,
             self.fuse,
-            self.classifier,
+            self.embedding,
         ]
 
         for module in modules_to_init:
@@ -182,7 +267,9 @@ class ImageClassificationModel(nn.Module):
                     nn.init.constant_(m.weight, 1)
                     nn.init.constant_(m.bias, 0)
 
+        self.classifier.reset_parameters()
+
     def check_parameters(self):
         total = sum(p.numel() for p in self.parameters())
-        print(f"📊 ResNet152-L34Fuse-GeM Params: {total / 1e6:.2f}M")
+        print(f"📊 ResNet152-L34Fuse-GeM-SubCenter Params: {total / 1e6:.2f}M")
         return total < 100_000_000

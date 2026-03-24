@@ -1,6 +1,6 @@
 import torch
 from tqdm import tqdm
-from utils import make_random_resized_views, feature_distribution_kl
+from utils import make_background_suppressed_views
 
 
 def train_one_epoch(
@@ -12,50 +12,59 @@ def train_one_epoch(
     device,
     scaler,
     stage,
-    use_multiview_distill=False,
-    alpha_mid=0.10,
-    distill_temperature=1.0,
+    use_bg_suppression=False,
+    bg_aux_weight=0.20,
+    proto_div_weight=0.01,
     max_grad_norm=5.0,
 ):
     model.train()
     running_loss, correct_preds, total_preds = 0.0, 0, 0
 
     pbar = tqdm(
-        train_loader, desc=f"Training Epoch {epoch}", leave=False, colour="blue")
+        train_loader,
+        desc=f"Training Epoch {epoch}",
+        leave=False,
+        colour="blue"
+    )
+
     for images, labels in pbar:
         images, labels = images.to(device), labels.to(device)
         optimizer.zero_grad(set_to_none=True)
 
-        do_distill = use_multiview_distill and stage == 1
+        do_bg_aux = use_bg_suppression and stage == 1
 
-        if do_distill:
-            mid_views = make_random_resized_views(
+        if do_bg_aux:
+            with torch.no_grad():
+                saliency = model.get_saliency(images)
+
+            bg_views = make_background_suppressed_views(
                 images,
-                scale_range=(0.65, 0.85),
-                out_size=(images.shape[-2], images.shape[-1])
+                saliency,
+                threshold_ratio=0.45,
+                suppress_strength=0.35,
+                blur_kernel=7
             ).to(device)
         else:
-            mid_views = None
+            bg_views = None
 
-        with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=device.type == 'cuda'):
+        with torch.amp.autocast('cuda', enabled=device.type == 'cuda'):
             # full image branch
             full_feat, _ = model.forward_features(images)
-            logits_full = model.classifier(full_feat)
+            logits_full, _, _ = model.forward_head(full_feat)
+
             loss_cls = criterion(logits_full, labels)
             loss = loss_cls
 
-            # distillation branch
-            if do_distill and mid_views is not None:
-                teacher_feat = full_feat.detach()  # 關鍵：teacher 不回傳 gradient
-                mid_feat, _ = model.forward_features(mid_views)
+            # background suppression auxiliary branch
+            if do_bg_aux and bg_views is not None:
+                bg_feat, _ = model.forward_features(bg_views)
+                logits_bg, _, _ = model.forward_head(bg_feat)
+                loss_bg = criterion(logits_bg, labels)
+                loss = loss + bg_aux_weight * loss_bg
 
-                loss_mid = feature_distribution_kl(
-                    mid_feat,
-                    teacher_feat,
-                    temperature=distill_temperature
-                )
-
-                loss = loss_cls + alpha_mid * loss_mid
+            # prototype diversity regularizer
+            loss_proto = model.prototype_diversity_loss(margin=0.2)
+            loss = loss + proto_div_weight * loss_proto
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
