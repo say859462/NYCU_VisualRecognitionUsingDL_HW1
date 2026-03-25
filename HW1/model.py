@@ -20,9 +20,40 @@ class GeM(nn.Module):
         return x.flatten(1)
 
 
+class CrossAttentionBlock(nn.Module):
+    def __init__(self, dim, num_heads=4, mlp_ratio=4.0, dropout=0.1):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.norm1 = nn.LayerNorm(dim)
+
+        hidden_dim = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, dim),
+            nn.Dropout(dropout),
+        )
+        self.norm2 = nn.LayerNorm(dim)
+
+    def forward(self, cls_token, tokens):
+        # cls_token: [B, 1, C]
+        # tokens:    [B, N, C]
+        attn_out, _ = self.attn(cls_token, tokens, tokens)
+        cls_token = self.norm1(cls_token + attn_out)
+
+        mlp_out = self.mlp(cls_token)
+        cls_token = self.norm2(cls_token + mlp_out)
+        return cls_token
+
+
 class SubCenterClassifier(nn.Module):
     """
-    Multi-prototype classifier:
     每個 class 有 K 個 sub-centers，logit 取 max over sub-centers
     """
 
@@ -47,13 +78,14 @@ class SubCenterClassifier(nn.Module):
         nn.init.normal_(self.weight, mean=0.0, std=0.01)
 
     def forward(self, x):
+        # x: [B, D]
         x = F.normalize(x, dim=1)
         w = F.normalize(self.weight, dim=2)  # [C, K, D]
 
-        logits_all = torch.einsum("bd,ckd->bck", x, w)
+        logits_all = torch.einsum("bd,ckd->bck", x, w)  # [B, C, K]
         logits_all = logits_all * self.scale.clamp(min=1.0)
 
-        class_logits, _ = logits_all.max(dim=2)
+        class_logits, _ = logits_all.max(dim=2)  # [B, C]
         return class_logits, logits_all
 
 
@@ -99,16 +131,11 @@ class ImageClassificationModel(nn.Module):
 
         self.pool = GeM(p=3.0, learn_p=True)
 
-        # Gated fusion:
-        # gate = sigmoid(MLP([global, local]))
-        # fused = gate * global + (1 - gate) * local
-        self.gate_fc = nn.Sequential(
-            nn.Linear(512 * 2, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
-            nn.Dropout(p=0.2),
-            nn.Linear(512, 512),
-        )
+        # CLS token + Cross-Attention fusion
+        self.token_pool = nn.AdaptiveAvgPool2d((4, 4))  # 16 tokens
+        self.cls_token = nn.Parameter(torch.randn(1, 1, 512))
+        self.cross_attn = CrossAttentionBlock(
+            dim=512, num_heads=4, mlp_ratio=4.0, dropout=0.1)
 
         # Embedding head
         self.embedding = nn.Sequential(
@@ -131,6 +158,9 @@ class ImageClassificationModel(nn.Module):
         self.set_train_stage(1)
         self._init_new_layers()
 
+    # =========================
+    # training stage control
+    # =========================
     def _freeze_shallow_layers(self):
         for module in [self.stem, self.layer1]:
             for param in module.parameters():
@@ -140,6 +170,8 @@ class ImageClassificationModel(nn.Module):
         if stage not in (1, 2):
             raise ValueError("stage should be 1 or 2")
 
+        # stage 1: train deeper backbone
+        # stage 2: freeze more backbone, focus on head calibration
         for param in self.layer2.parameters():
             param.requires_grad = (stage == 1)
         for param in self.layer3.parameters():
@@ -149,18 +181,25 @@ class ImageClassificationModel(nn.Module):
 
         for module in [
             self.proj_l3, self.proj_l4, self.fuse,
-            self.pool, self.gate_fc, self.embedding, self.classifier
+            self.pool, self.cross_attn, self.embedding, self.classifier
         ]:
             for param in module.parameters():
                 param.requires_grad = True
+
+        # cls token is standalone parameter
+        self.cls_token.requires_grad = True
 
     def _head_parameters(self):
         params = []
         for module in [
             self.proj_l3, self.proj_l4, self.fuse,
-            self.pool, self.gate_fc, self.embedding, self.classifier
+            self.pool, self.cross_attn, self.embedding, self.classifier
         ]:
             params.extend([p for p in module.parameters() if p.requires_grad])
+
+        if self.cls_token.requires_grad:
+            params.append(self.cls_token)
+
         return params
 
     def get_parameter_groups(self, lr_base, stage):
@@ -197,6 +236,9 @@ class ImageClassificationModel(nn.Module):
             },
         ]
 
+    # =========================
+    # feature extraction
+    # =========================
     def forward_features(self, x):
         x = self.stem(x)
         x = self.layer1(x)
@@ -213,35 +255,37 @@ class ImageClassificationModel(nn.Module):
         pooled = self.pool(fused_map)
         return pooled, fused_map
 
-    def forward_features_with_local(self, x):
-        global_feat, fused_map = self.forward_features(x)
+    def build_tokens(self, fused_map):
+        # fused_map: [B, 512, H, W]
+        tokens = self.token_pool(fused_map)          # [B, 512, 4, 4]
+        tokens = tokens.flatten(2).transpose(1, 2)   # [B, 16, 512]
+        return tokens
 
-        saliency = fused_map.pow(2).mean(dim=1, keepdim=True)
-        saliency = saliency - saliency.amin(dim=(2, 3), keepdim=True)
-        saliency = saliency / (saliency.amax(dim=(2, 3), keepdim=True) + 1e-6)
-
-        weighted_feat = fused_map * saliency
-        local_feat = self.pool(weighted_feat)
-
-        return global_feat, local_feat
-
-    def gated_fusion(self, global_feat, local_feat):
-        fusion_input = torch.cat([global_feat, local_feat], dim=1)
-        gate = torch.sigmoid(self.gate_fc(fusion_input))
-        fused = gate * global_feat + (1.0 - gate) * local_feat
-        return fused
+    def cls_cross_attention_fusion(self, fused_map):
+        tokens = self.build_tokens(fused_map)
+        B = tokens.size(0)
+        cls = self.cls_token.expand(B, -1, -1)       # [B, 1, 512]
+        cls = self.cross_attn(cls, tokens)           # [B, 1, 512]
+        cls = cls.squeeze(1)                         # [B, 512]
+        return cls
 
     def forward_head(self, pooled_512):
         embed = self.embedding(pooled_512)
         logits, logits_all = self.classifier(embed)
         return logits, embed, logits_all
 
+    # =========================
+    # main forward
+    # =========================
     def forward(self, x):
-        global_feat, local_feat = self.forward_features_with_local(x)
-        fused = self.gated_fusion(global_feat, local_feat)
-        logits, _, _ = self.forward_head(fused)
+        _, fused_map = self.forward_features(x)
+        cls_feat = self.cls_cross_attention_fusion(fused_map)
+        logits, _, _ = self.forward_head(cls_feat)
         return logits
 
+    # =========================
+    # utilities for train / vis
+    # =========================
     def get_saliency(self, x):
         is_training = self.training
         self.eval()
@@ -253,7 +297,7 @@ class ImageClassificationModel(nn.Module):
 
     def prototype_diversity_loss(self, margin=0.2):
         w = F.normalize(self.classifier.weight, dim=2)  # [C, K, D]
-        c, k, d = w.shape
+        _, k, _ = w.shape
         if k <= 1:
             return torch.tensor(0.0, device=w.device)
 
@@ -272,7 +316,7 @@ class ImageClassificationModel(nn.Module):
             self.proj_l3,
             self.proj_l4,
             self.fuse,
-            self.gate_fc,
+            self.cross_attn,
             self.embedding,
         ]
 
@@ -287,13 +331,17 @@ class ImageClassificationModel(nn.Module):
                     nn.init.normal_(m.weight, mean=0.0, std=0.01)
                     if m.bias is not None:
                         nn.init.constant_(m.bias, 0)
-                elif isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
-                    nn.init.constant_(m.weight, 1)
-                    nn.init.constant_(m.bias, 0)
+                elif isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d, nn.LayerNorm)):
+                    if hasattr(m, "weight") and m.weight is not None:
+                        nn.init.constant_(m.weight, 1)
+                    if hasattr(m, "bias") and m.bias is not None:
+                        nn.init.constant_(m.bias, 0)
 
+        nn.init.normal_(self.cls_token, mean=0.0, std=0.02)
         self.classifier.reset_parameters()
 
     def check_parameters(self):
         total = sum(p.numel() for p in self.parameters())
-        print(f"📊 ResNet152-L34Fuse-GeM-GatedFusion-SubCenter Params: {total / 1e6:.2f}M")
+        print(
+            f"📊 ResNet152-L34Fuse-GeM-CLS-CrossAttn-SubCenter Params: {total / 1e6:.2f}M")
         return total < 100_000_000

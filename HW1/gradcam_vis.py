@@ -66,7 +66,8 @@ def main():
         for img_path in sampled_image_paths:
             raw_img = Image.open(img_path).convert('RGB')
             cropped_img = preprocess_geo(raw_img)
-            input_tensor = preprocess_tensor(cropped_img).unsqueeze(0).to(device)
+            input_tensor = preprocess_tensor(
+                cropped_img).unsqueeze(0).to(device)
             rgb_img = np.float32(cropped_img) / 255.0
 
             with torch.no_grad():
@@ -100,7 +101,7 @@ def main():
 
             axes[1].imshow(vis)
             axes[1].axis('off')
-            axes[1].set_title("Gated Global-Local Attention")
+            axes[1].set_title(title="CNN Saliency (not Cross-Attention)")
 
             save_name = f"attn_{os.path.splitext(os.path.basename(img_path))[0]}.png"
             plt.savefig(os.path.join(class_save_dir, save_name))

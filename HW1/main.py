@@ -189,7 +189,8 @@ def main():
     best_val_acc = 0.0
     best_val_loss_for_acc = float('inf')
     best_val_loss_only = float('inf')
-    history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
+    history = {'train_loss': [], 'val_loss': [],
+               'train_acc': [], 'val_acc': []}
     best_val_preds, best_val_labels = [], []
 
     initial_stage = get_stage(start_epoch, stage1_epochs)
@@ -210,7 +211,8 @@ def main():
         epochs_no_improve = checkpoint.get('epochs_no_improve', 0)
         best_val_preds = checkpoint.get('best_val_preds', [])
         best_val_labels = checkpoint.get('best_val_labels', [])
-        best_val_loss_for_acc = checkpoint.get('best_val_loss_for_acc', float('inf'))
+        best_val_loss_for_acc = checkpoint.get(
+            'best_val_loss_for_acc', float('inf'))
         best_val_loss_only = checkpoint.get('best_val_loss_only', float('inf'))
 
         resume_stage = get_stage(start_epoch, stage1_epochs)
@@ -226,7 +228,8 @@ def main():
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             active_stage = resume_stage
 
-        print(f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch+1}.")
+        print(
+            f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch+1}.")
 
     training_start_time = time.time()
 
@@ -243,7 +246,7 @@ def main():
                     'cuda', enabled=device.type == 'cuda')
                 print(
                     f"\n🔄 Switching to Stage {stage}: "
-                    f"{'CE + gated global-local fusion + background suppression aux' if stage == 1 else 'short classifier calibration + Balanced Softmax'}"
+                    f"{'CE + CLS token + Cross-Attention fusion + background suppression aux' if stage == 1 else 'short classifier calibration + Balanced Softmax'}"
                 )
                 active_stage = stage
 
@@ -253,7 +256,7 @@ def main():
             print(f"\n--- Epoch {epoch+1}/{num_epochs} ---")
             print(
                 f"Stage {stage} | "
-                f"{'shuffle + CE + gated global/local fusion + background suppression aux + multi-prototype head' if stage == 1 else 'shuffle + Balanced Softmax'}"
+                f"{'shuffle + CE + CLS token + Cross-Attention fusion + background suppression aux + multi-prototype head' if stage == 1 else 'shuffle + Balanced Softmax'}"
             )
 
             train_loss, train_acc = train_one_epoch(
@@ -309,7 +312,8 @@ def main():
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
-                print(f"No improvement! {epochs_no_improve}/{early_stopping_patience}")
+                print(
+                    f"No improvement! {epochs_no_improve}/{early_stopping_patience}")
 
             torch.save({
                 'epoch': epoch,
