@@ -2,8 +2,6 @@ from utils import (
     plot_training_curves,
     plot_per_class_error,
     plot_long_tail_accuracy,
-    BalancedSoftmaxLoss,
-    CosFaceLoss
 )
 from val import validate_one_epoch
 from train import train_one_epoch
@@ -26,13 +24,9 @@ from torchvision import transforms
 cudnn.benchmark = True
 
 
-def get_stage(epoch, stage1_epochs):
-    return 1 if epoch < stage1_epochs else 2
-
-
-def build_optimizer(model, lr_base, stage):
+def build_optimizer(model, lr_base):
     return optim.AdamW(
-        model.get_parameter_groups(lr_base, stage),
+        model.get_parameter_groups(lr_base),
         weight_decay=3e-4
     )
 
@@ -52,29 +46,16 @@ class WarmUpCosineAnnealingLR(torch.optim.lr_scheduler._LRScheduler):
         if self.T_max == self.warmup_epochs:
             return [self.eta_min for _ in self.base_lrs]
 
-        progress = (self.last_epoch - self.warmup_epochs) / \
-            max(1, self.T_max - self.warmup_epochs)
+        progress = (self.last_epoch - self.warmup_epochs) / max(
+            1, self.T_max - self.warmup_epochs
+        )
         progress = min(max(progress, 0.0), 1.0)
+
         return [
-            self.eta_min + (base_lr - self.eta_min) *
-            (1 + math.cos(math.pi * progress)) / 2
+            self.eta_min + (base_lr - self.eta_min)
+            * (1 + math.cos(math.pi * progress)) / 2
             for base_lr in self.base_lrs
         ]
-
-
-def build_scheduler(optimizer, stage, stage1_epochs, total_epochs):
-    if stage == 1:
-        return WarmUpCosineAnnealingLR(
-            optimizer,
-            T_max=max(1, stage1_epochs),
-            warmup_epochs=5,
-            eta_min=1e-6
-        )
-    return torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=max(1, total_epochs - stage1_epochs),
-        eta_min=1e-6
-    )
 
 
 def main():
@@ -87,7 +68,7 @@ def main():
 
     batch_size = config['batch_size']
     num_epochs = config.get('num_epochs', 30)
-    lr_base = config.get('learning_rate', 8e-5)
+    lr_base = config.get('learning_rate', 1e-4)
     early_stopping_patience = config.get('early_stopping_patience', 10)
     num_classes = config['num_classes']
     data_dir = config['data_dir']
@@ -99,12 +80,13 @@ def main():
         './Model_Weight/best_loss_model.pth'
     )
 
-    stage1_epochs = config.get('stage1_epochs', 12)
     num_subcenters = config.get('num_subcenters', 3)
     embed_dim = config.get('embed_dim', 256)
     bg_aux_weight = config.get('bg_aux_weight', 0.20)
     proto_div_weight = config.get('proto_div_weight', 0.01)
-    cos_margin = config.get("cosface_margin", 0.10)
+    drop_view_weight = config.get("drop_view_weight", 0.15)
+    drop_prob = config.get("drop_prob", 0.4)
+
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -142,9 +124,11 @@ def main():
     ])
 
     train_dataset = ImageDataset(
-        root_dir=data_dir, split="train", transform=train_transform)
+        root_dir=data_dir, split="train", transform=train_transform
+    )
     val_dataset = ImageDataset(
-        root_dir=data_dir, split="val", transform=val_transform)
+        root_dir=data_dir, split="val", transform=val_transform
+    )
 
     train_loader = DataLoader(
         train_dataset,
@@ -175,36 +159,36 @@ def main():
         print("The number of parameter is greater than 100,000,000!")
         return
 
-    class_counts = torch.bincount(
-        torch.tensor(train_dataset.targets),
-        minlength=num_classes
-    ).float().to(device)
-
-    criterion_stage1 = nn.CrossEntropyLoss(label_smoothing=0.05).to(device)
-    criterion_stage2 = CosFaceLoss(margin=cos_margin).to(device)
+    criterion_train = nn.CrossEntropyLoss(label_smoothing=0.05).to(device)
     criterion_val = nn.CrossEntropyLoss().to(device)
+
+    optimizer = build_optimizer(model, lr_base)
+    scheduler = WarmUpCosineAnnealingLR(
+        optimizer,
+        T_max=num_epochs,
+        warmup_epochs=5,
+        eta_min=1e-6
+    )
 
     scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda')
 
-    start_epoch, epochs_no_improve = 0, 0
+    start_epoch = 0
+    epochs_no_improve = 0
     best_val_acc = 0.0
     best_val_loss_for_acc = float('inf')
     best_val_loss_only = float('inf')
-    history = {'train_loss': [], 'val_loss': [],
-               'train_acc': [], 'val_acc': []}
+    history = {
+        'train_loss': [],
+        'val_loss': [],
+        'train_acc': [],
+        'val_acc': []
+    }
     best_val_preds, best_val_labels = [], []
-
-    initial_stage = get_stage(start_epoch, stage1_epochs)
-    model.set_train_stage(initial_stage)
-    optimizer = build_optimizer(model, lr_base, initial_stage)
-    scheduler = build_scheduler(
-        optimizer, initial_stage, stage1_epochs, num_epochs)
-
-    active_stage = initial_stage
 
     if resume_training and os.path.exists(checkpoint_path):
         checkpoint = torch.load(
-            checkpoint_path, map_location=device, weights_only=False)
+            checkpoint_path, map_location=device, weights_only=False
+        )
         model.load_state_dict(checkpoint['model_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         best_val_acc = checkpoint['best_val_acc']
@@ -213,53 +197,31 @@ def main():
         best_val_preds = checkpoint.get('best_val_preds', [])
         best_val_labels = checkpoint.get('best_val_labels', [])
         best_val_loss_for_acc = checkpoint.get(
-            'best_val_loss_for_acc', float('inf'))
-        best_val_loss_only = checkpoint.get('best_val_loss_only', float('inf'))
+            'best_val_loss_for_acc', float('inf')
+        )
+        best_val_loss_only = checkpoint.get(
+            'best_val_loss_only', float('inf')
+        )
 
-        resume_stage = get_stage(start_epoch, stage1_epochs)
-        model.set_train_stage(resume_stage)
-        optimizer = build_optimizer(model, lr_base, resume_stage)
-        scheduler = build_scheduler(
-            optimizer, resume_stage, stage1_epochs, num_epochs)
-
-        checkpoint_stage = get_stage(checkpoint['epoch'], stage1_epochs)
-        if checkpoint_stage == resume_stage:
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            if 'scheduler_state_dict' in checkpoint:
-                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            active_stage = resume_stage
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if 'scheduler_state_dict' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
 
         print(
-            f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch+1}.")
+            f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch + 1}."
+        )
 
     training_start_time = time.time()
 
     try:
         for epoch in range(start_epoch, num_epochs):
-            stage = get_stage(epoch, stage1_epochs)
-
-            if stage != active_stage:
-                model.set_train_stage(stage)
-                optimizer = build_optimizer(model, lr_base, stage)
-                scheduler = build_scheduler(
-                    optimizer, stage, stage1_epochs, num_epochs)
-                scaler = torch.amp.GradScaler(
-                    'cuda', enabled=device.type == 'cuda')
-                print(
-                    f"\n🔄 Switching to Stage {stage}: "
-                    f"{'CE + CLS token + Cross-Attention fusion + background suppression aux' if stage == 1 else 'short classifier calibration + small margin  CosFace'}"
-                )
-                active_stage = stage
-
-            criterion_train = criterion_stage1 if stage == 1 else criterion_stage2
-            use_bg_suppression = (stage == 1)
-
-            print(f"\n--- Epoch {epoch+1}/{num_epochs} ---")
+            print(f"\n--- Epoch {epoch + 1}/{num_epochs} ---")
             print(
-                f"Stage {stage} | "
-                f"{'shuffle + CE + CLS token + Cross-Attention fusion + background suppression aux + multi-prototype head' if stage == 1 else 'classifier calibration + SubCenter CosFace'}"
+                "Stage 1 only | shuffle + CE + CLS token + "
+                "Cross-Attention fusion + background suppression aux + "
+                "multi-prototype head + token-drop auxiliary view"
             )
-            proto_weight = proto_div_weight if stage == 1 else 0.0
+
             train_loss, train_acc = train_one_epoch(
                 model=model,
                 train_loader=train_loader,
@@ -268,10 +230,10 @@ def main():
                 optimizer=optimizer,
                 device=device,
                 scaler=scaler,
-                stage=stage,
-                use_bg_suppression=use_bg_suppression,
+                use_bg_suppression=True,
                 bg_aux_weight=bg_aux_weight,
-                proto_div_weight=proto_weight,
+                proto_div_weight=proto_div_weight,
+                drop_view_weight=drop_view_weight
             )
 
             val_loss, val_acc, val_preds, val_labels = validate_one_epoch(
@@ -279,6 +241,7 @@ def main():
             )
 
             scheduler.step()
+
             history['train_loss'].append(train_loss)
             history['train_acc'].append(train_acc)
             history['val_loss'].append(val_loss)
@@ -292,7 +255,9 @@ def main():
 
             improved = False
 
-            if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss_for_acc):
+            if val_acc > best_val_acc or (
+                val_acc == best_val_acc and val_loss < best_val_loss_for_acc
+            ):
                 best_val_acc = val_acc
                 best_val_loss_for_acc = val_loss
                 best_val_preds = val_preds
@@ -314,11 +279,11 @@ def main():
             else:
                 epochs_no_improve += 1
                 print(
-                    f"No improvement! {epochs_no_improve}/{early_stopping_patience}")
+                    f"No improvement! {epochs_no_improve}/{early_stopping_patience}"
+                )
 
             torch.save({
                 'epoch': epoch,
-                'stage': stage,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
@@ -335,7 +300,7 @@ def main():
                 break
 
     except KeyboardInterrupt:
-        print("\n" + "="*50 + "\nDetected Keyboard Interrupt.\n" + "="*50)
+        print("\n" + "=" * 50 + "\nDetected Keyboard Interrupt.\n" + "=" * 50)
 
     hours, rem = divmod(time.time() - training_start_time, 3600)
     minutes, seconds = divmod(rem, 60)

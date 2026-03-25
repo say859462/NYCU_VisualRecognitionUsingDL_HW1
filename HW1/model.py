@@ -43,8 +43,6 @@ class CrossAttentionBlock(nn.Module):
         self.norm2 = nn.LayerNorm(dim)
 
     def forward(self, cls_token, tokens, return_attn=False):
-        # cls_token: [B, 1, C]
-        # tokens:    [B, N, C]
         if return_attn:
             attn_out, attn_weights = self.attn(
                 cls_token,
@@ -53,7 +51,6 @@ class CrossAttentionBlock(nn.Module):
                 need_weights=True,
                 average_attn_weights=False
             )
-            # attn_weights: [B, num_heads, 1, N]
         else:
             attn_out, _ = self.attn(
                 cls_token,
@@ -99,14 +96,13 @@ class SubCenterClassifier(nn.Module):
         nn.init.normal_(self.weight, mean=0.0, std=0.01)
 
     def forward(self, x):
-        # x: [B, D]
         x = F.normalize(x, dim=1)
-        w = F.normalize(self.weight, dim=2)  # [C, K, D]
+        w = F.normalize(self.weight, dim=2)
 
-        logits_all = torch.einsum("bd,ckd->bck", x, w)  # [B, C, K]
+        logits_all = torch.einsum("bd,ckd->bck", x, w)
         logits_all = logits_all * self.scale.clamp(min=1.0)
 
-        class_logits, _ = logits_all.max(dim=2)  # [B, C]
+        class_logits, _ = logits_all.max(dim=2)
         return class_logits, logits_all
 
 
@@ -124,7 +120,6 @@ class ImageClassificationModel(nn.Module):
             weights=models.ResNet152_Weights.DEFAULT if pretrained else None
         )
 
-        # Backbone
         self.stem = nn.Sequential(
             resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool
         )
@@ -133,7 +128,6 @@ class ImageClassificationModel(nn.Module):
         self.layer3 = resnet.layer3
         self.layer4 = resnet.layer4
 
-        # L3/L4 fusion
         self.proj_l3 = nn.Sequential(
             nn.Conv2d(1024, 256, kernel_size=1, bias=False),
             nn.BatchNorm2d(256),
@@ -152,13 +146,12 @@ class ImageClassificationModel(nn.Module):
 
         self.pool = GeM(p=3.0, learn_p=True)
 
-        # CLS token + Cross-Attention fusion
-        self.token_pool = nn.AdaptiveAvgPool2d((4, 4))  # 16 tokens
+        self.token_pool = nn.AdaptiveAvgPool2d((4, 4))
         self.cls_token = nn.Parameter(torch.randn(1, 1, 512))
         self.cross_attn = CrossAttentionBlock(
-            dim=512, num_heads=4, mlp_ratio=4.0, dropout=0.1)
+            dim=512, num_heads=4, mlp_ratio=4.0, dropout=0.1
+        )
 
-        # Embedding head
         self.embedding = nn.Sequential(
             nn.Linear(512, embed_dim),
             nn.BatchNorm1d(embed_dim),
@@ -166,7 +159,6 @@ class ImageClassificationModel(nn.Module):
             nn.Dropout(p=0.2),
         )
 
-        # Multi-prototype classifier
         self.classifier = SubCenterClassifier(
             in_features=embed_dim,
             num_classes=num_classes,
@@ -176,112 +168,61 @@ class ImageClassificationModel(nn.Module):
         )
 
         self._freeze_shallow_layers()
-        self.set_train_stage(1)
         self._init_new_layers()
 
-    # =========================
-    # training stage control
-    # =========================
     def _freeze_shallow_layers(self):
         for module in [self.stem, self.layer1]:
             for param in module.parameters():
                 param.requires_grad = False
 
-    def set_train_stage(self, stage):
-        if stage not in (1, 2):
-            raise ValueError("stage should be 1 or 2")
+        for param in self.layer2.parameters():
+            param.requires_grad = True
+        for param in self.layer3.parameters():
+            param.requires_grad = True
+        for param in self.layer4.parameters():
+            param.requires_grad = True
 
-        if stage == 1:
-            # backbone
-            for param in self.layer2.parameters():
-                param.requires_grad = True
-            for param in self.layer3.parameters():
-                param.requires_grad = True
-            for param in self.layer4.parameters():
-                param.requires_grad = True
-
-            # fusion / attention / head
-            for module in [
-                self.proj_l3, self.proj_l4, self.fuse,
-                self.pool, self.cross_attn, self.embedding, self.classifier
-            ]:
-                for param in module.parameters():
-                    param.requires_grad = True
-
-            self.cls_token.requires_grad = True
-
-        else:  # stage == 2
-            # 完全凍結 backbone 與 fusion / attention
-            for param in self.layer2.parameters():
-                param.requires_grad = False
-            for param in self.layer3.parameters():
-                param.requires_grad = False
-            for param in self.layer4.parameters():
-                param.requires_grad = False
-
-            for module in [self.proj_l3, self.proj_l4, self.fuse, self.pool, self.cross_attn]:
-                for param in module.parameters():
-                    param.requires_grad = False
-
-            self.cls_token.requires_grad = False
-
-            # 只保留 classifier head
-            for param in self.embedding.parameters():
-                param.requires_grad = True
-            for param in self.classifier.parameters():
+        for module in [
+            self.proj_l3, self.proj_l4, self.fuse,
+            self.pool, self.cross_attn, self.embedding, self.classifier
+        ]:
+            for param in module.parameters():
                 param.requires_grad = True
 
-    def _head_parameters(self):
-        params = []
+        self.cls_token.requires_grad = True
 
-        for module in [self.embedding, self.classifier]:
-            params.extend([p for p in module.parameters() if p.requires_grad])
+    def get_parameter_groups(self, lr_base):
+        head_params = []
+        for module in [
+            self.proj_l3, self.proj_l4, self.fuse,
+            self.pool, self.cross_attn, self.embedding, self.classifier
+        ]:
+            head_params.extend(
+                [p for p in module.parameters() if p.requires_grad]
+            )
 
-        return params
+        if self.cls_token.requires_grad:
+            head_params.append(self.cls_token)
 
-    def get_parameter_groups(self, lr_base, stage):
-        if stage == 1:
-            head_params = []
-            for module in [
-                self.proj_l3, self.proj_l4, self.fuse,
-                self.pool, self.cross_attn, self.embedding, self.classifier
-            ]:
-                head_params.extend([p for p in module.parameters() if p.requires_grad])
-
-            if self.cls_token.requires_grad:
-                head_params.append(self.cls_token)
-
-            return [
-                {
-                    "params": [p for p in self.layer2.parameters() if p.requires_grad],
-                    "lr": lr_base * 0.1,
-                },
-                {
-                    "params": [p for p in self.layer3.parameters() if p.requires_grad],
-                    "lr": lr_base * 0.5,
-                },
-                {
-                    "params": [p for p in self.layer4.parameters() if p.requires_grad],
-                    "lr": lr_base * 1.0,
-                },
-                {
-                    "params": head_params,
-                    "lr": lr_base * 1.5,
-                },
-            ]
-
-        # stage 2: head-only
-        head_params = self._head_parameters()
         return [
             {
+                "params": [p for p in self.layer2.parameters() if p.requires_grad],
+                "lr": lr_base * 0.1,
+            },
+            {
+                "params": [p for p in self.layer3.parameters() if p.requires_grad],
+                "lr": lr_base * 0.5,
+            },
+            {
+                "params": [p for p in self.layer4.parameters() if p.requires_grad],
+                "lr": lr_base * 1.0,
+            },
+            {
                 "params": head_params,
-                "lr": lr_base,
-            }
+                "lr": lr_base * 1.5,
+            },
         ]
 
-    # =========================
-    # feature extraction
-    # =========================
     def forward_features(self, x):
         x = self.stem(x)
         x = self.layer1(x)
@@ -299,10 +240,30 @@ class ImageClassificationModel(nn.Module):
         return pooled, fused_map
 
     def build_tokens(self, fused_map):
-        # fused_map: [B, 512, H, W]
-        tokens = self.token_pool(fused_map)          # [B, 512, 4, 4]
-        tokens = tokens.flatten(2).transpose(1, 2)   # [B, 16, 512]
+        tokens = self.token_pool(fused_map)
+        tokens = tokens.flatten(2).transpose(1, 2)
         return tokens
+
+    def cls_cross_attention_fusion(self, fused_map, return_attn=False):
+        tokens = self.build_tokens(fused_map)
+        batch_size = tokens.size(0)
+        cls = self.cls_token.expand(batch_size, -1, -1)
+
+        if return_attn:
+            cls, attn_weights = self.cross_attn(
+                cls, tokens, return_attn=True
+            )
+            cls = cls.squeeze(1)
+            return cls, attn_weights
+
+        cls = self.cross_attn(cls, tokens, return_attn=False)
+        cls = cls.squeeze(1)
+        return cls
+
+    def forward_head(self, pooled_512):
+        embed = self.embedding(pooled_512)
+        logits, logits_all = self.classifier(embed)
+        return logits, embed, logits_all
 
     def forward_with_attention(self, x):
         _, fused_map = self.forward_features(x)
@@ -314,48 +275,23 @@ class ImageClassificationModel(nn.Module):
 
     def get_cross_attention_map(self, x):
         """
-        回傳 CLS token 對 local tokens 的 attention map
         output: [B, 1, 4, 4]
         """
+        is_training = self.training
         self.eval()
         with torch.no_grad():
             _, attn_weights = self.forward_with_attention(x)
-            # attn_weights: [B, num_heads, 1, 16]
-            attn_map = attn_weights.mean(dim=1)       # [B, 1, 16]
+            attn_map = attn_weights.mean(dim=1)
             attn_map = attn_map.view(attn_map.size(0), 1, 4, 4)
+        self.train(is_training)
         return attn_map
 
-    def cls_cross_attention_fusion(self, fused_map, return_attn=False):
-        tokens = self.build_tokens(fused_map)          # [B, 16, 512]
-        B = tokens.size(0)
-        cls = self.cls_token.expand(B, -1, -1)        # [B, 1, 512]
-
-        if return_attn:
-            cls, attn_weights = self.cross_attn(cls, tokens, return_attn=True)
-            cls = cls.squeeze(1)                      # [B, 512]
-            return cls, attn_weights
-        else:
-            cls = self.cross_attn(cls, tokens, return_attn=False)
-            cls = cls.squeeze(1)                      # [B, 512]
-            return cls
-
-    def forward_head(self, pooled_512):
-        embed = self.embedding(pooled_512)
-        logits, logits_all = self.classifier(embed)
-        return logits, embed, logits_all
-
-    # =========================
-    # main forward
-    # =========================
     def forward(self, x):
         _, fused_map = self.forward_features(x)
         cls_feat = self.cls_cross_attention_fusion(fused_map)
         logits, _, _ = self.forward_head(cls_feat)
         return logits
 
-    # =========================
-    # utilities for train / vis
-    # =========================
     def get_saliency(self, x):
         is_training = self.training
         self.eval()
@@ -366,16 +302,16 @@ class ImageClassificationModel(nn.Module):
         return saliency
 
     def prototype_diversity_loss(self, margin=0.2):
-        w = F.normalize(self.classifier.weight, dim=2)  # [C, K, D]
-        _, k, _ = w.shape
-        if k <= 1:
+        w = F.normalize(self.classifier.weight, dim=2)
+        _, num_subcenters, _ = w.shape
+        if num_subcenters <= 1:
             return torch.tensor(0.0, device=w.device)
 
         loss = 0.0
         count = 0
-        for i in range(k):
-            for j in range(i + 1, k):
-                sim = (w[:, i, :] * w[:, j, :]).sum(dim=1)  # [C]
+        for i in range(num_subcenters):
+            for j in range(i + 1, num_subcenters):
+                sim = (w[:, i, :] * w[:, j, :]).sum(dim=1)
                 loss = loss + F.relu(sim - margin).mean()
                 count += 1
 
@@ -394,7 +330,8 @@ class ImageClassificationModel(nn.Module):
             for m in module.modules():
                 if isinstance(m, nn.Conv2d):
                     nn.init.kaiming_normal_(
-                        m.weight, mode="fan_out", nonlinearity="relu")
+                        m.weight, mode="fan_out", nonlinearity="relu"
+                    )
                     if m.bias is not None:
                         nn.init.constant_(m.bias, 0)
                 elif isinstance(m, nn.Linear):
@@ -413,5 +350,6 @@ class ImageClassificationModel(nn.Module):
     def check_parameters(self):
         total = sum(p.numel() for p in self.parameters())
         print(
-            f"📊 ResNet152-L34Fuse-GeM-CLS-CrossAttn-SubCenter Params: {total / 1e6:.2f}M")
+            f"📊 ResNet152-L34Fuse-GeM-CLS-CrossAttn-SubCenter Params: {total / 1e6:.2f}M"
+        )
         return total < 100_000_000
