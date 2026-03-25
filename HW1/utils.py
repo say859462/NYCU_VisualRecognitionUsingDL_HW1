@@ -12,6 +12,19 @@ from collections import defaultdict
 import copy
 
 
+class CosFaceLoss(nn.Module):
+    def __init__(self, margin=0.10):
+        super().__init__()
+        self.margin = margin
+
+    def forward(self, logits, targets, scale):
+        one_hot = torch.zeros_like(logits)
+        one_hot.scatter_(1, targets.view(-1, 1), 1.0)
+
+        logits_m = logits - one_hot * (scale * self.margin)
+        return F.cross_entropy(logits_m, targets)
+
+
 class PKSampler(Sampler):
     def __init__(self, labels, p, k):
         self.labels = labels

@@ -23,6 +23,7 @@ class GeM(nn.Module):
 class CrossAttentionBlock(nn.Module):
     def __init__(self, dim, num_heads=4, mlp_ratio=4.0, dropout=0.1):
         super().__init__()
+        self.num_heads = num_heads
         self.attn = nn.MultiheadAttention(
             embed_dim=dim,
             num_heads=num_heads,
@@ -41,14 +42,34 @@ class CrossAttentionBlock(nn.Module):
         )
         self.norm2 = nn.LayerNorm(dim)
 
-    def forward(self, cls_token, tokens):
+    def forward(self, cls_token, tokens, return_attn=False):
         # cls_token: [B, 1, C]
         # tokens:    [B, N, C]
-        attn_out, _ = self.attn(cls_token, tokens, tokens)
+        if return_attn:
+            attn_out, attn_weights = self.attn(
+                cls_token,
+                tokens,
+                tokens,
+                need_weights=True,
+                average_attn_weights=False
+            )
+            # attn_weights: [B, num_heads, 1, N]
+        else:
+            attn_out, _ = self.attn(
+                cls_token,
+                tokens,
+                tokens,
+                need_weights=False
+            )
+            attn_weights = None
+
         cls_token = self.norm1(cls_token + attn_out)
 
         mlp_out = self.mlp(cls_token)
         cls_token = self.norm2(cls_token + mlp_out)
+
+        if return_attn:
+            return cls_token, attn_weights
         return cls_token
 
 
@@ -261,13 +282,40 @@ class ImageClassificationModel(nn.Module):
         tokens = tokens.flatten(2).transpose(1, 2)   # [B, 16, 512]
         return tokens
 
-    def cls_cross_attention_fusion(self, fused_map):
-        tokens = self.build_tokens(fused_map)
+    def forward_with_attention(self, x):
+        _, fused_map = self.forward_features(x)
+        cls_feat, attn_weights = self.cls_cross_attention_fusion(
+            fused_map, return_attn=True
+        )
+        logits, _, _ = self.forward_head(cls_feat)
+        return logits, attn_weights
+
+    def get_cross_attention_map(self, x):
+        """
+        回傳 CLS token 對 local tokens 的 attention map
+        output: [B, 1, 4, 4]
+        """
+        self.eval()
+        with torch.no_grad():
+            _, attn_weights = self.forward_with_attention(x)
+            # attn_weights: [B, num_heads, 1, 16]
+            attn_map = attn_weights.mean(dim=1)       # [B, 1, 16]
+            attn_map = attn_map.view(attn_map.size(0), 1, 4, 4)
+        return attn_map
+
+    def cls_cross_attention_fusion(self, fused_map, return_attn=False):
+        tokens = self.build_tokens(fused_map)          # [B, 16, 512]
         B = tokens.size(0)
-        cls = self.cls_token.expand(B, -1, -1)       # [B, 1, 512]
-        cls = self.cross_attn(cls, tokens)           # [B, 1, 512]
-        cls = cls.squeeze(1)                         # [B, 512]
-        return cls
+        cls = self.cls_token.expand(B, -1, -1)        # [B, 1, 512]
+
+        if return_attn:
+            cls, attn_weights = self.cross_attn(cls, tokens, return_attn=True)
+            cls = cls.squeeze(1)                      # [B, 512]
+            return cls, attn_weights
+        else:
+            cls = self.cross_attn(cls, tokens, return_attn=False)
+            cls = cls.squeeze(1)                      # [B, 512]
+            return cls
 
     def forward_head(self, pooled_512):
         embed = self.embedding(pooled_512)

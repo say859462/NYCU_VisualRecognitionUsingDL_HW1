@@ -51,15 +51,22 @@ def train_one_epoch(
 
         with torch.amp.autocast('cuda', enabled=use_amp):
             logits_full = model(images)
-            loss = criterion(logits_full, labels)
-
+            if stage == 2:
+                loss = criterion(
+                    logits_full,
+                    labels,
+                    model.classifier.scale.clamp(min=1.0)
+                )
+            else:
+                loss = criterion(logits_full, labels)
             if do_bg_aux and bg_views is not None:
                 logits_bg = model(bg_views)
                 loss_bg = criterion(logits_bg, labels)
                 loss = loss + bg_aux_weight * loss_bg
 
-            loss_proto = model.prototype_diversity_loss(margin=0.2)
-            loss = loss + proto_div_weight * loss_proto
+            if stage == 1:
+                loss_proto = model.prototype_diversity_loss(margin=0.2)
+                loss = loss + proto_div_weight * loss_proto
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)

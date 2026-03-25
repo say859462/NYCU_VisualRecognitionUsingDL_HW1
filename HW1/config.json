@@ -13,5 +13,6 @@
   "num_subcenters": 3,
   "embed_dim": 256,
   "bg_aux_weight": 0.2,
-  "proto_div_weight": 0.01
+  "proto_div_weight": 0.01,
+  "cosface_margin": 0.10
 }

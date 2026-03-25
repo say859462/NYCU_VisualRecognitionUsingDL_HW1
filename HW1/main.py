@@ -3,6 +3,7 @@ from utils import (
     plot_per_class_error,
     plot_long_tail_accuracy,
     BalancedSoftmaxLoss,
+    CosFaceLoss
 )
 from val import validate_one_epoch
 from train import train_one_epoch
@@ -103,7 +104,7 @@ def main():
     embed_dim = config.get('embed_dim', 256)
     bg_aux_weight = config.get('bg_aux_weight', 0.20)
     proto_div_weight = config.get('proto_div_weight', 0.01)
-
+    cos_margin = config.get("cosface_margin", 0.10)
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -180,7 +181,7 @@ def main():
     ).float().to(device)
 
     criterion_stage1 = nn.CrossEntropyLoss(label_smoothing=0.05).to(device)
-    criterion_stage2 = BalancedSoftmaxLoss(class_counts).to(device)
+    criterion_stage2 = CosFaceLoss(margin=cos_margin).to(device)
     criterion_val = nn.CrossEntropyLoss().to(device)
 
     scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda')
@@ -246,7 +247,7 @@ def main():
                     'cuda', enabled=device.type == 'cuda')
                 print(
                     f"\n🔄 Switching to Stage {stage}: "
-                    f"{'CE + CLS token + Cross-Attention fusion + background suppression aux' if stage == 1 else 'short classifier calibration + Balanced Softmax'}"
+                    f"{'CE + CLS token + Cross-Attention fusion + background suppression aux' if stage == 1 else 'short classifier calibration + small margin  CosFace'}"
                 )
                 active_stage = stage
 
@@ -256,9 +257,9 @@ def main():
             print(f"\n--- Epoch {epoch+1}/{num_epochs} ---")
             print(
                 f"Stage {stage} | "
-                f"{'shuffle + CE + CLS token + Cross-Attention fusion + background suppression aux + multi-prototype head' if stage == 1 else 'shuffle + Balanced Softmax'}"
+                f"{'shuffle + CE + CLS token + Cross-Attention fusion + background suppression aux + multi-prototype head' if stage == 1 else 'classifier calibration + SubCenter CosFace'}"
             )
-
+            proto_weight = proto_div_weight if stage == 1 else 0.0
             train_loss, train_acc = train_one_epoch(
                 model=model,
                 train_loader=train_loader,
@@ -270,7 +271,7 @@ def main():
                 stage=stage,
                 use_bg_suppression=use_bg_suppression,
                 bg_aux_weight=bg_aux_weight,
-                proto_div_weight=proto_div_weight,
+                proto_div_weight=proto_weight,
             )
 
             val_loss, val_acc, val_preds, val_labels = validate_one_epoch(
