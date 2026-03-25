@@ -1,5 +1,6 @@
 import torch
 from tqdm import tqdm
+from train import generate_attention_guided_local_view
 
 
 def validate_one_epoch(model, val_loader, criterion, device):
@@ -12,7 +13,17 @@ def validate_one_epoch(model, val_loader, criterion, device):
         for images, labels in pbar:
             images, labels = images.to(device), labels.to(device)
 
-            logits = model(images)
+            local_images = generate_attention_guided_local_view(
+                model=model,
+                images=images,
+                source="saliency",
+                threshold_ratio=0.60,
+                min_crop_ratio=0.35,
+            )
+
+            outputs = model.forward_full_local(images, local_images)
+            logits = outputs["fused_logits"]
+
             loss = criterion(logits, labels)
             running_loss += loss.item() * images.size(0)
 

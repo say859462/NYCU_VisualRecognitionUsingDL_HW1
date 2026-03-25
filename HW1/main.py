@@ -24,10 +24,10 @@ from torchvision import transforms
 cudnn.benchmark = True
 
 
-def build_optimizer(model, lr_base):
+def     build_optimizer(model, lr_base):
     return optim.AdamW(
         model.get_parameter_groups(lr_base),
-        weight_decay=3e-4
+        weight_decay=5e-4
     )
 
 
@@ -82,10 +82,10 @@ def main():
 
     num_subcenters = config.get('num_subcenters', 3)
     embed_dim = config.get('embed_dim', 256)
-    bg_aux_weight = config.get('bg_aux_weight', 0.20)
-    proto_div_weight = config.get('proto_div_weight', 0.01)
-    drop_view_weight = config.get("drop_view_weight", 0.15)
-    drop_prob = config.get("drop_prob", 0.4)
+    local_view_weight = config.get('local_view_weight', 0.15)
+    local_view_source = config.get('local_view_source', 'saliency')
+    local_crop_threshold = config.get('local_crop_threshold', 0.60)
+    local_min_crop_ratio = config.get('local_min_crop_ratio', 0.35)
 
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -217,9 +217,9 @@ def main():
         for epoch in range(start_epoch, num_epochs):
             print(f"\n--- Epoch {epoch + 1}/{num_epochs} ---")
             print(
-                "Stage 1 only | shuffle + CE + CLS token + "
-                "Cross-Attention fusion + background suppression aux + "
-                "multi-prototype head + token-drop auxiliary view"
+                "Stage 1 only | shuffle + CE(fused logits) + "
+                "attention-guided local crop view + "
+                "CLS Cross-Attention full/local token fusion"
             )
 
             train_loss, train_acc = train_one_epoch(
@@ -230,10 +230,10 @@ def main():
                 optimizer=optimizer,
                 device=device,
                 scaler=scaler,
-                use_bg_suppression=True,
-                bg_aux_weight=bg_aux_weight,
-                proto_div_weight=proto_div_weight,
-                drop_view_weight=drop_view_weight
+                local_view_weight=local_view_weight,
+                local_view_source=local_view_source,
+                local_crop_threshold=local_crop_threshold,
+                local_min_crop_ratio=local_min_crop_ratio
             )
 
             val_loss, val_acc, val_preds, val_labels = validate_one_epoch(

@@ -9,6 +9,7 @@ from torchvision import transforms
 from tqdm import tqdm
 from dataset import ImageDataset
 from model import ImageClassificationModel
+from train import generate_attention_guided_local_view
 
 
 def main():
@@ -49,7 +50,19 @@ def main():
     with torch.no_grad():
         for images, _ in tqdm(test_loader, desc="Testing", colour="yellow"):
             images = images.to(device)
-            avg_probs = F.softmax(model(images), dim=1)
+
+            local_images = generate_attention_guided_local_view(
+                model=model,
+                images=images,
+                source=config.get("local_view_source", "saliency"),
+                threshold_ratio=config.get("local_crop_threshold", 0.60),
+                min_crop_ratio=config.get("local_min_crop_ratio", 0.35),
+            )
+
+            outputs = model.forward_full_local(images, local_images)
+            logits = outputs["fused_logits"]
+
+            avg_probs = F.softmax(logits, dim=1)
             _, preds = torch.max(avg_probs, 1)
             all_predictions.extend(preds.cpu().numpy())
 

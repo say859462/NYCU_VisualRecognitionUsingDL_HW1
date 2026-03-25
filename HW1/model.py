@@ -244,8 +244,7 @@ class ImageClassificationModel(nn.Module):
         tokens = tokens.flatten(2).transpose(1, 2)
         return tokens
 
-    def cls_cross_attention_fusion(self, fused_map, return_attn=False):
-        tokens = self.build_tokens(fused_map)
+    def cls_cross_attention_from_tokens(self, tokens, return_attn=False):
         batch_size = tokens.size(0)
         cls = self.cls_token.expand(batch_size, -1, -1)
 
@@ -260,18 +259,44 @@ class ImageClassificationModel(nn.Module):
         cls = cls.squeeze(1)
         return cls
 
+    def cls_cross_attention_fusion(self, fused_map, return_attn=False):
+        tokens = self.build_tokens(fused_map)
+        return self.cls_cross_attention_from_tokens(
+            tokens, return_attn=return_attn
+        )
+
     def forward_head(self, pooled_512):
         embed = self.embedding(pooled_512)
         logits, logits_all = self.classifier(embed)
         return logits, embed, logits_all
 
-    def forward_with_attention(self, x):
+    def forward_view(self, x, return_attn=False):
         _, fused_map = self.forward_features(x)
-        cls_feat, attn_weights = self.cls_cross_attention_fusion(
-            fused_map, return_attn=True
-        )
-        logits, _, _ = self.forward_head(cls_feat)
-        return logits, attn_weights
+        tokens = self.build_tokens(fused_map)
+
+        if return_attn:
+            cls_feat, attn_weights = self.cls_cross_attention_from_tokens(
+                tokens, return_attn=True
+            )
+        else:
+            cls_feat = self.cls_cross_attention_from_tokens(
+                tokens, return_attn=False
+            )
+            attn_weights = None
+
+        logits, embed, logits_all = self.forward_head(cls_feat)
+        return {
+            "tokens": tokens,
+            "cls_feat": cls_feat,
+            "logits": logits,
+            "embed": embed,
+            "logits_all": logits_all,
+            "attn_weights": attn_weights
+        }
+
+    def forward_with_attention(self, x):
+        outputs = self.forward_view(x, return_attn=True)
+        return outputs["logits"], outputs["attn_weights"]
 
     def get_cross_attention_map(self, x):
         """
@@ -287,10 +312,35 @@ class ImageClassificationModel(nn.Module):
         return attn_map
 
     def forward(self, x):
-        _, fused_map = self.forward_features(x)
-        cls_feat = self.cls_cross_attention_fusion(fused_map)
-        logits, _, _ = self.forward_head(cls_feat)
-        return logits
+        outputs = self.forward_view(x, return_attn=False)
+        return outputs["logits"]
+
+    def forward_full_local(self, full_x, local_x):
+        full_outputs = self.forward_view(full_x, return_attn=False)
+        local_outputs = self.forward_view(local_x, return_attn=False)
+
+        fused_tokens = torch.cat(
+            [full_outputs["tokens"], local_outputs["tokens"]],
+            dim=1
+        )
+        fused_cls = self.cls_cross_attention_from_tokens(
+            fused_tokens, return_attn=False
+        )
+        fused_logits, fused_embed, fused_logits_all = self.forward_head(
+            fused_cls
+        )
+
+        return {
+            "fused_logits": fused_logits,
+            "full_logits": full_outputs["logits"],
+            "local_logits": local_outputs["logits"],
+            "fused_embed": fused_embed,
+            "full_embed": full_outputs["embed"],
+            "local_embed": local_outputs["embed"],
+            "fused_logits_all": fused_logits_all,
+            "full_logits_all": full_outputs["logits_all"],
+            "local_logits_all": local_outputs["logits_all"],
+        }
 
     def get_saliency(self, x):
         is_training = self.training
