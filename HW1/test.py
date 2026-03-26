@@ -9,7 +9,7 @@ from torchvision import transforms
 from tqdm import tqdm
 from dataset import ImageDataset
 from model import ImageClassificationModel
-from train import generate_fast_top1_local_view
+from train import generate_cross_attention_bbox_local_view
 
 
 def main():
@@ -59,11 +59,14 @@ def main():
         for images, _ in tqdm(test_loader, desc="Testing", colour="yellow"):
             images = images.to(device, non_blocking=True)
 
-            local1_images = generate_fast_top1_local_view(
+            local1_images = generate_cross_attention_bbox_local_view(
                 model=model,
                 images=images,
-                crop_ratio=config['local_crop_ratio'],
-                padding_ratio=config['local_crop_padding_ratio']
+                threshold_ratio=config['local_crop_threshold'],
+                padding_ratio=config['local_crop_padding_ratio'],
+                min_crop_ratio=config['local_min_crop_ratio'],
+                max_crop_ratio=config['local_max_crop_ratio'],
+                fallback_crop_ratio=config['local_fallback_crop_ratio']
             )
 
             outputs = model.forward_full_local(images, local1_images)

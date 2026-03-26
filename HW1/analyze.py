@@ -13,21 +13,14 @@ from torchvision import transforms
 
 from dataset import ImageDataset
 from model import ImageClassificationModel
-from train import generate_fast_top1_local_view
+from train import generate_cross_attention_bbox_local_view
 
 
-# =========================================================
-# Utilities
-# =========================================================
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 
 
 def denormalize_image(img_tensor: torch.Tensor) -> np.ndarray:
-    """
-    img_tensor: [3, H, W], normalized tensor
-    return: numpy image in [H, W, 3], range [0,1]
-    """
     img = img_tensor.detach().cpu() * IMAGENET_STD + IMAGENET_MEAN
     img = torch.clamp(img, 0.0, 1.0)
     return img.permute(1, 2, 0).numpy()
@@ -46,16 +39,12 @@ def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
 
-# =========================================================
-# Core analysis
-# =========================================================
 @torch.no_grad()
 def run_analysis(
     model,
     val_loader,
     device,
-    crop_ratio: float,
-    padding_ratio: float,
+    config,
     save_dir: str,
     max_visualizations: int = 80,
     hard_pair_topk: int = 20,
@@ -68,7 +57,6 @@ def run_analysis(
 
     records = []
     confusion_counter = defaultdict(int)
-
     vis_count = 0
 
     for batch_idx, batch in enumerate(val_loader):
@@ -76,45 +64,34 @@ def run_analysis(
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
-        # -------------------------------------------------
-        # 1) generate local crop (latest exp: top-1 fast bbox crop)
-        # -------------------------------------------------
-        local_images = generate_fast_top1_local_view(
+        local_images = generate_cross_attention_bbox_local_view(
             model=model,
             images=images,
-            crop_ratio=crop_ratio,
-            padding_ratio=padding_ratio,
+            threshold_ratio=config['local_crop_threshold'],
+            padding_ratio=config['local_crop_padding_ratio'],
+            min_crop_ratio=config['local_min_crop_ratio'],
+            max_crop_ratio=config['local_max_crop_ratio'],
+            fallback_crop_ratio=config['local_fallback_crop_ratio']
         )
 
-        # -------------------------------------------------
-        # 2) forward paths
-        # -------------------------------------------------
-        # full-only
         full_logits = model(images)
 
-        # fused + local1
         outputs = model.forward_full_local(images, local_images)
         fused_logits = outputs["fused_logits"]
         local_logits = outputs["local1_logits"]
 
-        # probabilities
         full_probs = softmax_probs(full_logits)
         local_probs = softmax_probs(local_logits)
         fused_probs = softmax_probs(fused_logits)
 
-        # top-k
         full_topv, full_topi = topk_info(full_probs, k=3)
         local_topv, local_topi = topk_info(local_probs, k=3)
         fused_topv, fused_topi = topk_info(fused_probs, k=3)
 
-        # predictions
         full_pred = torch.argmax(full_probs, dim=1)
         local_pred = torch.argmax(local_probs, dim=1)
         fused_pred = torch.argmax(fused_probs, dim=1)
 
-        # -------------------------------------------------
-        # 3) per-sample records
-        # -------------------------------------------------
         batch_size = images.size(0)
         for i in range(batch_size):
             y = labels[i].item()
@@ -163,9 +140,6 @@ def run_analysis(
             if p_fused != y:
                 confusion_counter[(y, p_fused)] += 1
 
-            # ---------------------------------------------
-            # visualization
-            # ---------------------------------------------
             if vis_count < max_visualizations:
                 img_np = denormalize_image(images[i])
                 local_np = denormalize_image(local_images[i])
@@ -186,33 +160,21 @@ def run_analysis(
 
                 plt.tight_layout()
                 plt.savefig(
-                    os.path.join(
-                        vis_dir, f"sample_{vis_count:04d}_true_{y}.png"),
+                    os.path.join(vis_dir, f"sample_{vis_count:04d}_true_{y}.png"),
                     dpi=200
                 )
                 plt.close(fig)
                 vis_count += 1
 
-    # =====================================================
-    # Save detailed CSV
-    # =====================================================
     df = pd.DataFrame(records)
-    df.to_csv(os.path.join(
-        save_dir, "full_local_fused_predictions.csv"), index=False)
+    df.to_csv(os.path.join(save_dir, "full_local_fused_predictions.csv"), index=False)
 
-    # =====================================================
-    # Summary report
-    # =====================================================
     summary = {}
-
     summary["num_samples"] = len(df)
     summary["full_acc"] = float(df["full_correct"].mean() * 100.0)
     summary["local_acc"] = float(df["local_correct"].mean() * 100.0)
     summary["fused_acc"] = float(df["fused_correct"].mean() * 100.0)
 
-    # ---------------------------------------------
-    # Case analysis
-    # ---------------------------------------------
     cond_full_wrong_local_right_fused_right = (
         (df["full_correct"] == 0) &
         (df["local_correct"] == 1) &
@@ -247,21 +209,13 @@ def run_analysis(
         cond_full_right_local_wrong_fused_right.sum()
     )
 
-    # ---------------------------------------------
-    # Confidence analysis on fused errors
-    # ---------------------------------------------
     fused_error_df = df[df["fused_correct"] == 0].copy()
     if len(fused_error_df) > 0:
-        summary["mean_fused_error_conf"] = float(
-            fused_error_df["fused_conf"].mean())
-        summary["median_fused_error_conf"] = float(
-            fused_error_df["fused_conf"].median())
-        summary["mean_fused_error_top2_prob"] = float(
-            fused_error_df["fused_top2_prob"].mean())
-        summary["high_conf_wrong_count_ge_0.9"] = int(
-            (fused_error_df["fused_conf"] >= 0.9).sum())
-        summary["high_conf_wrong_count_ge_0.8"] = int(
-            (fused_error_df["fused_conf"] >= 0.8).sum())
+        summary["mean_fused_error_conf"] = float(fused_error_df["fused_conf"].mean())
+        summary["median_fused_error_conf"] = float(fused_error_df["fused_conf"].median())
+        summary["mean_fused_error_top2_prob"] = float(fused_error_df["fused_top2_prob"].mean())
+        summary["high_conf_wrong_count_ge_0.9"] = int((fused_error_df["fused_conf"] >= 0.9).sum())
+        summary["high_conf_wrong_count_ge_0.8"] = int((fused_error_df["fused_conf"] >= 0.8).sum())
     else:
         summary["mean_fused_error_conf"] = None
         summary["median_fused_error_conf"] = None
@@ -269,9 +223,6 @@ def run_analysis(
         summary["high_conf_wrong_count_ge_0.9"] = 0
         summary["high_conf_wrong_count_ge_0.8"] = 0
 
-    # ---------------------------------------------
-    # Hard pairs
-    # ---------------------------------------------
     hard_pairs = sorted(
         confusion_counter.items(),
         key=lambda x: x[1],
@@ -293,18 +244,11 @@ def run_analysis(
         })
 
     hard_df = pd.DataFrame(hard_pair_rows)
-    hard_df.to_csv(os.path.join(
-        save_dir, "hard_pairs_confidence.csv"), index=False)
+    hard_df.to_csv(os.path.join(save_dir, "hard_pairs_confidence.csv"), index=False)
 
-    # ---------------------------------------------
-    # Save summary JSON
-    # ---------------------------------------------
     with open(os.path.join(save_dir, "analysis_summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
-    # ---------------------------------------------
-    # Save special subsets for manual inspection
-    # ---------------------------------------------
     df[cond_full_wrong_local_right_fused_right].to_csv(
         os.path.join(save_dir, "cases_full_wrong_local_right_fused_right.csv"),
         index=False
@@ -321,19 +265,14 @@ def run_analysis(
     return summary
 
 
-# =========================================================
-# Main
-# =========================================================
 def main():
     parser = argparse.ArgumentParser(
-        description="Analyze full / local / fused behavior under latest top-1 local crop setting"
+        description="Analyze full / local / fused behavior under cross-attention bbox crop"
     )
     parser.add_argument("--config", type=str, default="./config.json")
-    parser.add_argument("--model_path", type=str,
-                        default="./Model_Weight/best_model.pth")
-    parser.add_argument("--save_dir", type=str,
-                        default="./Plot/Analysis_LocalCrop_62th")
-    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--model_path", type=str, default="./Model_Weight/63th/best_model.pth")
+    parser.add_argument("--save_dir", type=str, default="./Plot/Analysis_CrossAttnBBox_62th")
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--max_visualizations", type=int, default=80)
     parser.add_argument("--hard_pair_topk", type=int, default=20)
     args = parser.parse_args()
@@ -384,8 +323,7 @@ def main():
         model=model,
         val_loader=val_loader,
         device=device,
-        crop_ratio=config.get("local_crop_ratio", 0.40),
-        padding_ratio=config.get("local_crop_padding_ratio", 0.12),
+        config=config,
         save_dir=args.save_dir,
         max_visualizations=args.max_visualizations,
         hard_pair_topk=args.hard_pair_topk,

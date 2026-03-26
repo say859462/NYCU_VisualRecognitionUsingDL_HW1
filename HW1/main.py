@@ -82,11 +82,13 @@ def main():
 
     num_subcenters = config.get('num_subcenters', 3)
     embed_dim = config.get('embed_dim', 256)
-    
-    local1_view_weight = config.get('local1_view_weight', 0.10)
-    local_crop_ratio = config.get('local_crop_ratio', 0.40)
-    local_crop_padding_ratio = config.get('local_crop_padding_ratio', 0.12)
 
+    local1_view_weight = config.get('local1_view_weight', 0.10)
+    local_crop_threshold = config.get('local_crop_threshold', 0.55)
+    local_crop_padding_ratio = config.get('local_crop_padding_ratio', 0.12)
+    local_min_crop_ratio = config.get('local_min_crop_ratio', 0.20)
+    local_max_crop_ratio = config.get('local_max_crop_ratio', 0.75)
+    local_fallback_crop_ratio = config.get('local_fallback_crop_ratio', 0.40)
 
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -218,9 +220,8 @@ def main():
         for epoch in range(start_epoch, num_epochs):
             print(f"\n--- Epoch {epoch + 1}/{num_epochs} ---")
             print(
-                " shuffle + CE(fused) + saliency-region bbox top-1 "
-                "local crops + 10~15% padding + CLS Cross-Attention fusion over "
-                "full + local1 "
+                "CE(fused) + cross-attention threshold bbox top-1 local crop + "
+                "10~15% padding + CLS Cross-Attention fusion over full + local1"
             )
 
             train_loss, train_acc = train_one_epoch(
@@ -232,8 +233,11 @@ def main():
                 device=device,
                 scaler=scaler,
                 local1_view_weight=local1_view_weight,
-                local_crop_ratio=local_crop_ratio,
+                local_crop_threshold=local_crop_threshold,
                 local_crop_padding_ratio=local_crop_padding_ratio,
+                local_min_crop_ratio=local_min_crop_ratio,
+                local_max_crop_ratio=local_max_crop_ratio,
+                local_fallback_crop_ratio=local_fallback_crop_ratio,
             )
 
             val_loss, val_acc, val_preds, val_labels = validate_one_epoch(

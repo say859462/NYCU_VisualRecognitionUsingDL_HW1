@@ -1,6 +1,6 @@
 import torch
 from tqdm import tqdm
-from train import generate_fast_top1_local_view
+from train import generate_cross_attention_bbox_local_view
 
 
 def validate_one_epoch(model, val_loader, criterion, device, config):
@@ -15,11 +15,14 @@ def validate_one_epoch(model, val_loader, criterion, device, config):
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
 
-            local1_views = generate_fast_top1_local_view(
+            local1_views = generate_cross_attention_bbox_local_view(
                 model=model,
                 images=images,
-                crop_ratio=config['local_crop_ratio'],
-                padding_ratio=config['local_crop_padding_ratio']
+                threshold_ratio=config['local_crop_threshold'],
+                padding_ratio=config['local_crop_padding_ratio'],
+                min_crop_ratio=config['local_min_crop_ratio'],
+                max_crop_ratio=config['local_max_crop_ratio'],
+                fallback_crop_ratio=config['local_fallback_crop_ratio']
             )
 
             outputs = model.forward_full_local(images, local1_views)

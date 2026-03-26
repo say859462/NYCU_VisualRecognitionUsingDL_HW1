@@ -3,74 +3,167 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 
-def _build_box_from_peak(cy, cx, crop_h, crop_w, pad_h, pad_w, H, W, device):
-    y1 = cy - crop_h // 2 - pad_h
-    y2 = cy + crop_h // 2 + pad_h
-    x1 = cx - crop_w // 2 - pad_w
-    x2 = cx + crop_w // 2 + pad_w
+def _build_box_from_peak(cy, cx, crop_h, crop_w, H, W):
+    y1 = max(0, int(cy) - crop_h // 2)
+    y2 = min(H, y1 + crop_h)
+    y1 = max(0, y2 - crop_h)
 
-    y1 = torch.clamp(y1, 0, H - 1)
-    x1 = torch.clamp(x1, 0, W - 1)
-    y2 = torch.clamp(y2, y1 + 1, H)
-    x2 = torch.clamp(x2, x1 + 1, W)
+    x1 = max(0, int(cx) - crop_w // 2)
+    x2 = min(W, x1 + crop_w)
+    x1 = max(0, x2 - crop_w)
 
-    return torch.stack([
-        y1.to(device=device, dtype=torch.long),
-        x1.to(device=device, dtype=torch.long),
-        y2.to(device=device, dtype=torch.long),
-        x2.to(device=device, dtype=torch.long),
-    ])
+    return y1, y2, x1, x2
 
 
-def generate_fast_top1_local_view(
+def _expand_with_padding(y1, y2, x1, x2, H, W, padding_ratio):
+    box_h = max(1, y2 - y1)
+    box_w = max(1, x2 - x1)
+
+    pad_h = max(1, int(box_h * padding_ratio))
+    pad_w = max(1, int(box_w * padding_ratio))
+
+    y1 = max(0, y1 - pad_h)
+    y2 = min(H, y2 + pad_h)
+    x1 = max(0, x1 - pad_w)
+    x2 = min(W, x2 + pad_w)
+
+    return y1, y2, x1, x2
+
+
+def _clamp_box_size(y1, y2, x1, x2, H, W, min_crop_h, min_crop_w, max_crop_h, max_crop_w):
+    box_h = y2 - y1
+    box_w = x2 - x1
+
+    # too small -> expand around center
+    if box_h < min_crop_h:
+        cy = (y1 + y2) // 2
+        y1 = max(0, cy - min_crop_h // 2)
+        y2 = min(H, y1 + min_crop_h)
+        y1 = max(0, y2 - min_crop_h)
+
+    if box_w < min_crop_w:
+        cx = (x1 + x2) // 2
+        x1 = max(0, cx - min_crop_w // 2)
+        x2 = min(W, x1 + min_crop_w)
+        x1 = max(0, x2 - min_crop_w)
+
+    # too large -> shrink around center
+    box_h = y2 - y1
+    box_w = x2 - x1
+
+    if box_h > max_crop_h:
+        cy = (y1 + y2) // 2
+        y1 = max(0, cy - max_crop_h // 2)
+        y2 = min(H, y1 + max_crop_h)
+        y1 = max(0, y2 - max_crop_h)
+
+    if box_w > max_crop_w:
+        cx = (x1 + x2) // 2
+        x1 = max(0, cx - max_crop_w // 2)
+        x2 = min(W, x1 + max_crop_w)
+        x1 = max(0, x2 - max_crop_w)
+
+    return y1, y2, x1, x2
+
+
+def generate_cross_attention_bbox_local_view(
     model,
     images,
-    crop_ratio=0.40,
+    threshold_ratio=0.55,
     padding_ratio=0.12,
+    min_crop_ratio=0.20,
+    max_crop_ratio=0.75,
+    fallback_crop_ratio=0.40,
 ):
     """
-    Fast GPU-based top-1 saliency crop.
-    用 saliency peak 建立單一 local bounding box，不做 CPU 搜索。
+    Cross-attention threshold-mask -> bounding box crop
+    1) get_cross_attention_map()
+    2) upsample to image size
+    3) normalize per sample
+    4) mask = attn >= threshold * max(attn)
+    5) bbox from all positive pixels
+    6) padding
+    7) if too small / too large / empty -> fallback peak-centered crop
     """
     with torch.no_grad():
-        response_map = model.get_saliency(images)  # (B, h, w)
-        response_map = F.interpolate(
-            response_map.unsqueeze(1),
+        attn_map = model.get_cross_attention_map(images)   # [B,1,4,4]
+        attn_map = F.interpolate(
+            attn_map,
             size=images.shape[-2:],
             mode='bilinear',
             align_corners=False
-        ).squeeze(1)
+        )  # [B,1,H,W]
 
-    B, H, W = response_map.shape
+    B, _, H, W = attn_map.shape
     device = images.device
 
-    crop_h = max(2, int(H * crop_ratio))
-    crop_w = max(2, int(W * crop_ratio))
-    pad_h = max(1, int(crop_h * padding_ratio))
-    pad_w = max(1, int(crop_w * padding_ratio))
+    # per-sample normalize
+    attn_min = attn_map.amin(dim=(2, 3), keepdim=True)
+    attn_max = attn_map.amax(dim=(2, 3), keepdim=True)
+    norm_map = (attn_map - attn_min) / (attn_max - attn_min + 1e-8)
 
-    flat = response_map.view(B, -1)
-    top1_idx = torch.argmax(flat, dim=1)
-
-    ys = top1_idx // W
-    xs = top1_idx % W
+    min_crop_h = max(2, int(H * min_crop_ratio))
+    min_crop_w = max(2, int(W * min_crop_ratio))
+    max_crop_h = max(min_crop_h, int(H * max_crop_ratio))
+    max_crop_w = max(min_crop_w, int(W * max_crop_ratio))
+    fallback_crop_h = max(2, int(H * fallback_crop_ratio))
+    fallback_crop_w = max(2, int(W * fallback_crop_ratio))
 
     local_list = []
 
     for b in range(B):
-        box = _build_box_from_peak(
-            ys[b], xs[b], crop_h, crop_w, pad_h, pad_w, H, W, device
-        )
+        single_map = norm_map[b, 0]  # [H,W]
+        peak_val = single_map.max()
+        mask = single_map >= (peak_val * threshold_ratio)
 
-        y1, x1, y2, x2 = [int(v.item()) for v in box]
+        coords = torch.nonzero(mask, as_tuple=False)
+
+        if coords.numel() == 0:
+            flat_idx = torch.argmax(single_map.view(-1)).item()
+            cy = flat_idx // W
+            cx = flat_idx % W
+            y1, y2, x1, x2 = _build_box_from_peak(
+                cy, cx, fallback_crop_h, fallback_crop_w, H, W
+            )
+        else:
+            ys = coords[:, 0]
+            xs = coords[:, 1]
+
+            y1 = int(ys.min().item())
+            y2 = int(ys.max().item()) + 1
+            x1 = int(xs.min().item())
+            x2 = int(xs.max().item()) + 1
+
+            y1, y2, x1, x2 = _expand_with_padding(
+                y1, y2, x1, x2, H, W, padding_ratio
+            )
+
+            y1, y2, x1, x2 = _clamp_box_size(
+                y1, y2, x1, x2,
+                H, W,
+                min_crop_h, min_crop_w,
+                max_crop_h, max_crop_w
+            )
+
+            # safety fallback: if box still degenerate
+            if (y2 - y1) < 2 or (x2 - x1) < 2:
+                flat_idx = torch.argmax(single_map.view(-1)).item()
+                cy = flat_idx // W
+                cx = flat_idx % W
+                y1, y2, x1, x2 = _build_box_from_peak(
+                    cy, cx, fallback_crop_h, fallback_crop_w, H, W
+                )
 
         crop = images[b:b + 1, :, y1:y2, x1:x2]
         crop = F.interpolate(
-            crop, size=(H, W), mode='bilinear', align_corners=False
+            crop,
+            size=(H, W),
+            mode='bilinear',
+            align_corners=False
         )
         local_list.append(crop)
 
-    local = torch.cat(local_list, dim=0)
+    local = torch.cat(local_list, dim=0).to(device)
     return local
 
 
@@ -83,8 +176,11 @@ def train_one_epoch(
     device,
     scaler,
     local1_view_weight=0.10,
-    local_crop_ratio=0.40,
+    local_crop_threshold=0.55,
     local_crop_padding_ratio=0.12,
+    local_min_crop_ratio=0.20,
+    local_max_crop_ratio=0.75,
+    local_fallback_crop_ratio=0.40,
     max_grad_norm=5.0,
 ):
     model.train()
@@ -101,11 +197,14 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
 
-        local1_images = generate_fast_top1_local_view(
+        local1_images = generate_cross_attention_bbox_local_view(
             model=model,
             images=images,
-            crop_ratio=local_crop_ratio,
+            threshold_ratio=local_crop_threshold,
             padding_ratio=local_crop_padding_ratio,
+            min_crop_ratio=local_min_crop_ratio,
+            max_crop_ratio=local_max_crop_ratio,
+            fallback_crop_ratio=local_fallback_crop_ratio,
         )
 
         use_amp = (device.type == 'cuda')
