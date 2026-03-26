@@ -27,7 +27,7 @@ cudnn.benchmark = True
 def build_optimizer(model, lr_base):
     return optim.AdamW(
         model.get_parameter_groups(lr_base),
-        weight_decay=5e-4
+        weight_decay=5e-4,
     )
 
 
@@ -46,14 +46,13 @@ class WarmUpCosineAnnealingLR(torch.optim.lr_scheduler._LRScheduler):
         if self.T_max == self.warmup_epochs:
             return [self.eta_min for _ in self.base_lrs]
 
-        progress = (self.last_epoch - self.warmup_epochs) / max(
-            1, self.T_max - self.warmup_epochs
-        )
+        progress = (self.last_epoch - self.warmup_epochs) / \
+            max(1, self.T_max - self.warmup_epochs)
         progress = min(max(progress, 0.0), 1.0)
 
         return [
-            self.eta_min + (base_lr - self.eta_min)
-            * (1 + math.cos(math.pi * progress)) / 2
+            self.eta_min + (base_lr - self.eta_min) *
+            (1 + math.cos(math.pi * progress)) / 2
             for base_lr in self.base_lrs
         ]
 
@@ -81,11 +80,14 @@ def main():
     num_subcenters = config.get('num_subcenters', 3)
     embed_dim = config.get('embed_dim', 256)
 
-    local1_view_weight = config.get('local1_view_weight', 0.10)
+    stage_a_epochs = config.get('stage_a_epochs', 6)
+    full_view_weight = config.get('full_view_weight', 1.0)
+    fused_view_weight = config.get('fused_view_weight', 0.5)
+    local1_view_weight = config.get('local1_view_weight', 0.02)
     proto_diversity_weight = config.get('proto_diversity_weight', 0.0)
 
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     train_transform = transforms.Compose([
         transforms.RandomResizedCrop(448, scale=(0.55, 1.0)),
@@ -106,8 +108,8 @@ def main():
         transforms.ToTensor(),
         transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        )
+            std=[0.229, 0.224, 0.225],
+        ),
     ])
 
     val_transform = transforms.Compose([
@@ -116,16 +118,14 @@ def main():
         transforms.ToTensor(),
         transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        )
+            std=[0.229, 0.224, 0.225],
+        ),
     ])
 
     train_dataset = ImageDataset(
-        root_dir=data_dir, split="train", transform=train_transform
-    )
+        root_dir=data_dir, split='train', transform=train_transform)
     val_dataset = ImageDataset(
-        root_dir=data_dir, split="val", transform=val_transform
-    )
+        root_dir=data_dir, split='val', transform=val_transform)
 
     train_loader = DataLoader(
         train_dataset,
@@ -133,7 +133,7 @@ def main():
         shuffle=True,
         num_workers=8,
         pin_memory=True,
-        persistent_workers=True
+        persistent_workers=True,
     )
 
     val_loader = DataLoader(
@@ -142,18 +142,18 @@ def main():
         shuffle=False,
         num_workers=8,
         pin_memory=True,
-        persistent_workers=True
+        persistent_workers=True,
     )
 
     model = ImageClassificationModel(
         num_classes=num_classes,
         pretrained=True,
         num_subcenters=num_subcenters,
-        embed_dim=embed_dim
+        embed_dim=embed_dim,
     ).to(device)
 
     if not model.check_parameters():
-        print("The number of parameter is greater than 100,000,000!")
+        print('The number of parameters is greater than 100,000,000!')
         return
 
     criterion_train = nn.CrossEntropyLoss(label_smoothing=0.05).to(device)
@@ -164,7 +164,7 @@ def main():
         optimizer,
         T_max=num_epochs,
         warmup_epochs=5,
-        eta_min=1e-6
+        eta_min=1e-6,
     )
 
     scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda')
@@ -179,14 +179,13 @@ def main():
         'train_loss': [],
         'val_loss': [],
         'train_acc': [],
-        'val_acc': []
+        'val_acc': [],
     }
     best_val_preds, best_val_labels = [], []
 
     if resume_training and os.path.exists(checkpoint_path):
         checkpoint = torch.load(
-            checkpoint_path, map_location=device, weights_only=False
-        )
+            checkpoint_path, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         best_val_acc = checkpoint.get('best_val_acc', 0.0)
@@ -203,20 +202,20 @@ def main():
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
 
         print(
-            f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch + 1}."
-        )
+            f'✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch + 1}.')
 
     training_start_time = time.time()
 
     try:
         for epoch in range(start_epoch, num_epochs):
             current_epoch = epoch + 1
+            stage_name = 'Stage A | Full-only anchor' if current_epoch <= stage_a_epochs else 'Stage B | Full-anchor + view-aware fusion'
 
-            print(f"\n--- Epoch {current_epoch}/{num_epochs} ---")
+            print(f'\n--- Epoch {current_epoch}/{num_epochs} ---')
+            print(stage_name)
             print(
-                "Stage 1 only | CE(fused) + cross-attention threshold bbox top-1 "
-                "local crop + 10~15% padding + CLS Cross-Attention fusion over "
-                "full + local1"
+                f'Loss weights -> full: {full_view_weight:.2f}, fused: {fused_view_weight:.2f}, '
+                f'local: {local1_view_weight:.2f} | stage_a_epochs={stage_a_epochs}'
             )
 
             train_loss, train_acc = train_one_epoch(
@@ -227,19 +226,22 @@ def main():
                 optimizer=optimizer,
                 device=device,
                 scaler=scaler,
+                stage_a_epochs=stage_a_epochs,
+                full_view_weight=full_view_weight,
+                fused_view_weight=fused_view_weight,
                 local1_view_weight=local1_view_weight,
                 proto_diversity_weight=proto_diversity_weight,
-                local_crop_threshold=config.get('local_crop_threshold', 0.55),
+                local_crop_threshold=config.get('local_crop_threshold', 0.45),
                 local_crop_padding_ratio=config.get(
-                    'local_crop_padding_ratio', 0.12),
-                local_min_crop_ratio=config.get('local_min_crop_ratio', 0.20),
-                local_max_crop_ratio=config.get('local_max_crop_ratio', 0.75),
+                    'local_crop_padding_ratio', 0.18),
+                local_min_crop_ratio=config.get('local_min_crop_ratio', 0.30),
+                local_max_crop_ratio=config.get('local_max_crop_ratio', 0.85),
                 local_fallback_crop_ratio=config.get(
-                    'local_fallback_crop_ratio', 0.40),
+                    'local_fallback_crop_ratio', 0.50),
             )
 
             val_loss, val_acc, val_preds, val_labels = validate_one_epoch(
-                model, val_loader, criterion_val, device, config
+                model, val_loader, criterion_val, device, config, epoch=current_epoch
             )
 
             scheduler.step()
@@ -257,31 +259,27 @@ def main():
 
             improved = False
 
-            if val_acc > best_val_acc or (
-                val_acc == best_val_acc and val_loss < best_val_loss_for_acc
-            ):
+            if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss_for_acc):
                 best_val_acc = val_acc
                 best_val_loss_for_acc = val_loss
                 best_val_preds = val_preds
                 best_val_labels = val_labels
                 improved = True
-
                 torch.save(model.state_dict(), best_model_path)
-                print(f"🌟 Best model saved ({best_val_acc:.2f}%)")
+                print(f'🌟 Best model saved ({best_val_acc:.2f}%)')
 
             if val_loss < best_val_loss_only:
                 best_val_loss_only = val_loss
                 improved = True
-
                 torch.save(model.state_dict(), best_loss_model_path)
-                print(f"💡 Best loss model saved ({best_val_loss_only:.4f})")
+                print(f'💡 Best loss model saved ({best_val_loss_only:.4f})')
 
             if improved:
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
                 print(
-                    f"No improvement! {epochs_no_improve}/{early_stopping_patience}")
+                    f'No improvement! {epochs_no_improve}/{early_stopping_patience}')
 
             torch.save({
                 'epoch': epoch,
@@ -294,27 +292,29 @@ def main():
                 'history': history,
                 'epochs_no_improve': epochs_no_improve,
                 'best_val_preds': best_val_preds,
-                'best_val_labels': best_val_labels
+                'best_val_labels': best_val_labels,
             }, checkpoint_path)
 
             if epochs_no_improve >= early_stopping_patience:
                 break
 
     except KeyboardInterrupt:
-        print("\n" + "=" * 50 + "\nDetected Keyboard Interrupt.\n" + "=" * 50)
+        print('\n' + '=' * 50 + '\nDetected Keyboard Interrupt.\n' + '=' * 50)
 
     hours, rem = divmod(time.time() - training_start_time, 3600)
     minutes, seconds = divmod(rem, 60)
 
-    plot_dir = "./Plot"
+    plot_dir = './Plot'
     os.makedirs(plot_dir, exist_ok=True)
 
     if history['train_loss']:
-        print("\n📈 Generating analysis plots...")
+        print('\n📈 Generating analysis plots...')
         plot_training_curves(
-            history['train_loss'], history['val_loss'],
-            history['train_acc'], history['val_acc'],
-            save_path=os.path.join(plot_dir, "training_curves.png")
+            history['train_loss'],
+            history['val_loss'],
+            history['train_acc'],
+            history['val_acc'],
+            save_path=os.path.join(plot_dir, 'training_curves.png'),
         )
 
         if best_val_preds and best_val_labels:
@@ -322,21 +322,21 @@ def main():
                 best_val_preds,
                 best_val_labels,
                 num_classes=num_classes,
-                save_path=os.path.join(plot_dir, "error_dist.png")
+                save_path=os.path.join(plot_dir, 'error_dist.png'),
             )
             plot_long_tail_accuracy(
                 train_labels=train_dataset.targets,
                 val_preds=best_val_preds,
                 val_labels=best_val_labels,
                 num_classes=num_classes,
-                save_path=os.path.join(plot_dir, "long_tail_acc.png")
+                save_path=os.path.join(plot_dir, 'long_tail_acc.png'),
             )
 
     print(
-        f"\n✅ Training Completed. Best Val Acc: {best_val_acc:.2f}% | "
-        f"Total Time: {int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}"
+        f'\n✅ Training Completed. Best Val Acc: {best_val_acc:.2f}% | '
+        f'Total Time: {int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}'
     )
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

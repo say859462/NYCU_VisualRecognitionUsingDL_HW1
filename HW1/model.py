@@ -23,12 +23,11 @@ class GeM(nn.Module):
 class CrossAttentionBlock(nn.Module):
     def __init__(self, dim, num_heads=4, mlp_ratio=4.0, dropout=0.2):
         super().__init__()
-        self.num_heads = num_heads
         self.attn = nn.MultiheadAttention(
             embed_dim=dim,
             num_heads=num_heads,
             dropout=dropout,
-            batch_first=True
+            batch_first=True,
         )
         self.norm1 = nn.LayerNorm(dim)
 
@@ -49,19 +48,18 @@ class CrossAttentionBlock(nn.Module):
                 tokens,
                 tokens,
                 need_weights=True,
-                average_attn_weights=False
+                average_attn_weights=False,
             )
         else:
             attn_out, _ = self.attn(
                 cls_token,
                 tokens,
                 tokens,
-                need_weights=False
+                need_weights=False,
             )
             attn_weights = None
 
         cls_token = self.norm1(cls_token + attn_out)
-
         mlp_out = self.mlp(cls_token)
         cls_token = self.norm2(cls_token + mlp_out)
 
@@ -77,9 +75,8 @@ class SubCenterClassifier(nn.Module):
         self.num_classes = num_classes
         self.num_subcenters = num_subcenters
 
-        self.weight = nn.Parameter(
-            torch.randn(num_classes, num_subcenters, in_features)
-        )
+        self.weight = nn.Parameter(torch.randn(
+            num_classes, num_subcenters, in_features))
 
         if learn_scale:
             self.scale = nn.Parameter(torch.tensor(float(scale)))
@@ -97,19 +94,12 @@ class SubCenterClassifier(nn.Module):
 
         logits_all = torch.einsum("bd,ckd->bck", x, w)
         logits_all = logits_all * self.scale.clamp(min=1.0)
-
         class_logits, _ = logits_all.max(dim=2)
         return class_logits, logits_all
 
 
 class ImageClassificationModel(nn.Module):
-    def __init__(
-        self,
-        num_classes=100,
-        pretrained=True,
-        num_subcenters=3,
-        embed_dim=256
-    ):
+    def __init__(self, num_classes=100, pretrained=True, num_subcenters=3, embed_dim=256):
         super().__init__()
 
         resnet = models.resnet152(
@@ -117,8 +107,7 @@ class ImageClassificationModel(nn.Module):
         )
 
         self.stem = nn.Sequential(
-            resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool
-        )
+            resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool)
         self.layer1 = resnet.layer1
         self.layer2 = resnet.layer2
         self.layer3 = resnet.layer3
@@ -141,9 +130,13 @@ class ImageClassificationModel(nn.Module):
         )
 
         self.pool = GeM(p=3.0, learn_p=True)
-
         self.token_pool = nn.AdaptiveAvgPool2d((7, 7))
+
         self.cls_token = nn.Parameter(torch.randn(1, 1, 512))
+        self.pos_embed = nn.Parameter(torch.zeros(1, 49, 512))
+        self.full_view_embed = nn.Parameter(torch.zeros(1, 1, 512))
+        self.local_view_embed = nn.Parameter(torch.zeros(1, 1, 512))
+
         self.cross_attn = CrossAttentionBlock(
             dim=512, num_heads=4, mlp_ratio=4.0, dropout=0.1
         )
@@ -160,7 +153,7 @@ class ImageClassificationModel(nn.Module):
             num_classes=num_classes,
             num_subcenters=num_subcenters,
             scale=16.0,
-            learn_scale=True
+            learn_scale=True,
         )
 
         self._freeze_shallow_layers()
@@ -171,34 +164,42 @@ class ImageClassificationModel(nn.Module):
             for param in module.parameters():
                 param.requires_grad = False
 
-        for param in self.layer2.parameters():
-            param.requires_grad = True
-        for param in self.layer3.parameters():
-            param.requires_grad = True
-        for param in self.layer4.parameters():
-            param.requires_grad = True
+        for module in [self.layer2, self.layer3, self.layer4]:
+            for param in module.parameters():
+                param.requires_grad = True
 
         for module in [
-            self.proj_l3, self.proj_l4, self.fuse,
-            self.pool, self.cross_attn, self.embedding, self.classifier
+            self.proj_l3,
+            self.proj_l4,
+            self.fuse,
+            self.pool,
+            self.cross_attn,
+            self.embedding,
+            self.classifier,
         ]:
             for param in module.parameters():
                 param.requires_grad = True
 
-        self.cls_token.requires_grad = True
+        for param in [self.cls_token, self.pos_embed, self.full_view_embed, self.local_view_embed]:
+            param.requires_grad = True
 
     def get_parameter_groups(self, lr_base):
         head_params = []
         for module in [
-            self.proj_l3, self.proj_l4, self.fuse,
-            self.pool, self.cross_attn, self.embedding, self.classifier
+            self.proj_l3,
+            self.proj_l4,
+            self.fuse,
+            self.pool,
+            self.cross_attn,
+            self.embedding,
+            self.classifier,
         ]:
             head_params.extend(
-                [p for p in module.parameters() if p.requires_grad]
-            )
+                [p for p in module.parameters() if p.requires_grad])
 
-        if self.cls_token.requires_grad:
-            head_params.append(self.cls_token)
+        for param in [self.cls_token, self.pos_embed, self.full_view_embed, self.local_view_embed]:
+            if param.requires_grad:
+                head_params.append(param)
 
         return [
             {
@@ -240,58 +241,64 @@ class ImageClassificationModel(nn.Module):
         tokens = tokens.flatten(2).transpose(1, 2)
         return tokens
 
+    def add_token_embeddings(self, tokens, view_type="full"):
+        if tokens.size(1) != self.pos_embed.size(1):
+            raise ValueError(
+                f"Token length mismatch: got {tokens.size(1)}, expected {self.pos_embed.size(1)}"
+            )
+
+        if view_type == "full":
+            view_embed = self.full_view_embed
+        elif view_type == "local":
+            view_embed = self.local_view_embed
+        else:
+            raise ValueError(f"Unsupported view_type: {view_type}")
+
+        return tokens + self.pos_embed + view_embed
+
     def cls_cross_attention_from_tokens(self, tokens, return_attn=False):
         batch_size = tokens.size(0)
         cls = self.cls_token.expand(batch_size, -1, -1)
 
         if return_attn:
-            cls, attn_weights = self.cross_attn(
-                cls, tokens, return_attn=True
-            )
-            cls = cls.squeeze(1)
-            return cls, attn_weights
+            cls, attn_weights = self.cross_attn(cls, tokens, return_attn=True)
+            return cls.squeeze(1), attn_weights
 
         cls = self.cross_attn(cls, tokens, return_attn=False)
-        cls = cls.squeeze(1)
-        return cls
-
-    def cls_cross_attention_fusion(self, fused_map, return_attn=False):
-        tokens = self.build_tokens(fused_map)
-        return self.cls_cross_attention_from_tokens(
-            tokens, return_attn=return_attn
-        )
+        return cls.squeeze(1)
 
     def forward_head(self, pooled_512):
         embed = self.embedding(pooled_512)
         logits, logits_all = self.classifier(embed)
         return logits, embed, logits_all
 
-    def forward_view(self, x, return_attn=False):
+    def forward_view(self, x, return_attn=False, view_type="full"):
         _, fused_map = self.forward_features(x)
         tokens = self.build_tokens(fused_map)
+        encoded_tokens = self.add_token_embeddings(tokens, view_type=view_type)
 
         if return_attn:
             cls_feat, attn_weights = self.cls_cross_attention_from_tokens(
-                tokens, return_attn=True
+                encoded_tokens, return_attn=True
             )
         else:
             cls_feat = self.cls_cross_attention_from_tokens(
-                tokens, return_attn=False
-            )
+                encoded_tokens, return_attn=False)
             attn_weights = None
 
         logits, embed, logits_all = self.forward_head(cls_feat)
         return {
             "tokens": tokens,
+            "encoded_tokens": encoded_tokens,
             "cls_feat": cls_feat,
             "logits": logits,
             "embed": embed,
             "logits_all": logits_all,
-            "attn_weights": attn_weights
+            "attn_weights": attn_weights,
         }
 
     def forward_with_attention(self, x):
-        outputs = self.forward_view(x, return_attn=True)
+        outputs = self.forward_view(x, return_attn=True, view_type="full")
         return outputs["logits"], outputs["attn_weights"]
 
     def get_cross_attention_map(self, x):
@@ -305,26 +312,28 @@ class ImageClassificationModel(nn.Module):
         return attn_map
 
     def forward(self, x):
-        outputs = self.forward_view(x, return_attn=False)
+        outputs = self.forward_view(x, return_attn=False, view_type="full")
         return outputs["logits"]
 
     def forward_full_local(self, full_x, local1_x, local2_x=None):
-        full_outputs = self.forward_view(full_x, return_attn=False)
-        local1_outputs = self.forward_view(local1_x, return_attn=False)
+        full_outputs = self.forward_view(
+            full_x, return_attn=False, view_type="full")
+        local1_outputs = self.forward_view(
+            local1_x, return_attn=False, view_type="local")
 
-        all_tokens = [full_outputs["tokens"], local1_outputs["tokens"]]
+        all_tokens = [full_outputs["encoded_tokens"],
+                      local1_outputs["encoded_tokens"]]
         local2_outputs = None
         if local2_x is not None:
-            local2_outputs = self.forward_view(local2_x, return_attn=False)
-            all_tokens.append(local2_outputs["tokens"])
+            local2_outputs = self.forward_view(
+                local2_x, return_attn=False, view_type="local")
+            all_tokens.append(local2_outputs["encoded_tokens"])
 
         fused_tokens = torch.cat(all_tokens, dim=1)
         fused_cls = self.cls_cross_attention_from_tokens(
-            fused_tokens, return_attn=False
-        )
+            fused_tokens, return_attn=False)
         fused_logits, fused_embed, fused_logits_all = self.forward_head(
-            fused_cls
-        )
+            fused_cls)
 
         return {
             "fused_logits": fused_logits,
@@ -379,8 +388,7 @@ class ImageClassificationModel(nn.Module):
             for m in module.modules():
                 if isinstance(m, nn.Conv2d):
                     nn.init.kaiming_normal_(
-                        m.weight, mode="fan_out", nonlinearity="relu"
-                    )
+                        m.weight, mode="fan_out", nonlinearity="relu")
                     if m.bias is not None:
                         nn.init.constant_(m.bias, 0)
                 elif isinstance(m, nn.Linear):
@@ -394,11 +402,13 @@ class ImageClassificationModel(nn.Module):
                         nn.init.constant_(m.bias, 0)
 
         nn.init.normal_(self.cls_token, mean=0.0, std=0.02)
+        nn.init.normal_(self.pos_embed, mean=0.0, std=0.02)
+        nn.init.normal_(self.full_view_embed, mean=0.0, std=0.02)
+        nn.init.normal_(self.local_view_embed, mean=0.0, std=0.02)
         self.classifier.reset_parameters()
 
     def check_parameters(self):
         total = sum(p.numel() for p in self.parameters())
         print(
-            f"📊 ResNet152-L34Fuse-GeM-CLS-CrossAttn-SubCenter Params: {total / 1e6:.2f}M"
-        )
+            f"📊 ResNet152-L34Fuse-GeM-CLS-CrossAttn-ViewAware Params: {total / 1e6:.2f}M")
         return total < 100_000_000
