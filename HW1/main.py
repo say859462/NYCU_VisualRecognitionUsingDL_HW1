@@ -49,7 +49,6 @@ class WarmUpCosineAnnealingLR(torch.optim.lr_scheduler._LRScheduler):
         progress = (self.last_epoch - self.warmup_epochs) / \
             max(1, self.T_max - self.warmup_epochs)
         progress = min(max(progress, 0.0), 1.0)
-
         return [
             self.eta_min + (base_lr - self.eta_min) *
             (1 + math.cos(math.pi * progress)) / 2
@@ -80,12 +79,6 @@ def main():
     num_subcenters = config.get('num_subcenters', 3)
     embed_dim = config.get('embed_dim', 256)
 
-    stage_a_epochs = config.get('stage_a_epochs', 6)
-    full_view_weight = config.get('full_view_weight', 1.0)
-    fused_view_weight = config.get('fused_view_weight', 0.5)
-    local1_view_weight = config.get('local1_view_weight', 0.02)
-    proto_diversity_weight = config.get('proto_diversity_weight', 0.0)
-
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -106,20 +99,16 @@ def main():
         ),
         transforms.RandomAdjustSharpness(sharpness_factor=1.5, p=0.3),
         transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225],
-        ),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
+                             0.229, 0.224, 0.225]),
     ])
 
     val_transform = transforms.Compose([
         transforms.Resize(512),
         transforms.CenterCrop(448),
         transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225],
-        ),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
+                             0.229, 0.224, 0.225]),
     ])
 
     train_dataset = ImageDataset(
@@ -127,23 +116,10 @@ def main():
     val_dataset = ImageDataset(
         root_dir=data_dir, split='val', transform=val_transform)
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=8,
-        pin_memory=True,
-        persistent_workers=True,
-    )
-
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=8,
-        pin_memory=True,
-        persistent_workers=True,
-    )
+    train_loader = DataLoader(train_dataset, batch_size=batch_size,
+                              shuffle=True, num_workers=8, pin_memory=True, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+                            num_workers=8, pin_memory=True, persistent_workers=True)
 
     model = ImageClassificationModel(
         num_classes=num_classes,
@@ -161,12 +137,7 @@ def main():
 
     optimizer = build_optimizer(model, lr_base)
     scheduler = WarmUpCosineAnnealingLR(
-        optimizer,
-        T_max=num_epochs,
-        warmup_epochs=5,
-        eta_min=1e-6,
-    )
-
+        optimizer, T_max=num_epochs, warmup_epochs=5, eta_min=1e-6)
     scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda')
 
     start_epoch = 0
@@ -175,12 +146,8 @@ def main():
     best_val_loss_for_acc = float('inf')
     best_val_loss_only = float('inf')
 
-    history = {
-        'train_loss': [],
-        'val_loss': [],
-        'train_acc': [],
-        'val_acc': [],
-    }
+    history = {'train_loss': [], 'val_loss': [],
+               'train_acc': [], 'val_acc': []}
     best_val_preds, best_val_labels = [], []
 
     if resume_training and os.path.exists(checkpoint_path):
@@ -196,11 +163,9 @@ def main():
         epochs_no_improve = checkpoint.get('epochs_no_improve', 0)
         best_val_preds = checkpoint.get('best_val_preds', [])
         best_val_labels = checkpoint.get('best_val_labels', [])
-
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if 'scheduler_state_dict' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-
         print(
             f'✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch + 1}.')
 
@@ -209,16 +174,7 @@ def main():
     try:
         for epoch in range(start_epoch, num_epochs):
             current_epoch = epoch + 1
-            stage_name = 'Stage A | Full-only anchor' if current_epoch <= stage_a_epochs else 'Stage B | Full-anchor + view-aware fusion'
-
-            print(f'\n--- Epoch {current_epoch}/{num_epochs} ---')
-            print(stage_name)
-            print(
-                f'Loss weights -> full: {full_view_weight:.2f}, fused: {fused_view_weight:.2f}, '
-                f'local: {local1_view_weight:.2f} | stage_a_epochs={stage_a_epochs}'
-            )
-
-            train_loss, train_acc = train_one_epoch(
+            train_loss, train_acc, train_stage_cfg = train_one_epoch(
                 model=model,
                 train_loader=train_loader,
                 criterion=criterion_train,
@@ -226,31 +182,28 @@ def main():
                 optimizer=optimizer,
                 device=device,
                 scaler=scaler,
-                stage_a_epochs=stage_a_epochs,
-                full_view_weight=full_view_weight,
-                fused_view_weight=fused_view_weight,
-                local1_view_weight=local1_view_weight,
-                proto_diversity_weight=proto_diversity_weight,
-                local_crop_threshold=config.get('local_crop_threshold', 0.45),
-                local_crop_padding_ratio=config.get(
-                    'local_crop_padding_ratio', 0.18),
-                local_min_crop_ratio=config.get('local_min_crop_ratio', 0.30),
-                local_max_crop_ratio=config.get('local_max_crop_ratio', 0.85),
-                local_fallback_crop_ratio=config.get(
-                    'local_fallback_crop_ratio', 0.50),
+                config=config,
             )
 
-            val_loss, val_acc, val_preds, val_labels = validate_one_epoch(
+            val_loss, val_acc, val_preds, val_labels, val_stage_cfg = validate_one_epoch(
                 model, val_loader, criterion_val, device, config, epoch=current_epoch
             )
 
             scheduler.step()
-
             history['train_loss'].append(train_loss)
             history['train_acc'].append(train_acc)
             history['val_loss'].append(val_loss)
             history['val_acc'].append(val_acc)
 
+            print(f'\n--- Epoch {current_epoch}/{num_epochs} ---')
+            print(train_stage_cfg['stage_name'])
+            print(
+                'Loss weights -> '
+                f"global: {train_stage_cfg['global_weight']:.2f}, "
+                f"part2: {train_stage_cfg['part2_weight']:.2f}, "
+                f"part4: {train_stage_cfg['part4_weight']:.2f}, "
+                f"concat: {train_stage_cfg['concat_weight']:.2f}"
+            )
             print(
                 f"LR: {optimizer.param_groups[-1]['lr']:.6f} | "
                 f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
@@ -258,7 +211,6 @@ def main():
             )
 
             improved = False
-
             if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss_for_acc):
                 best_val_acc = val_acc
                 best_val_loss_for_acc = val_loss
@@ -306,36 +258,20 @@ def main():
 
     plot_dir = './Plot'
     os.makedirs(plot_dir, exist_ok=True)
-
     if history['train_loss']:
         print('\n📈 Generating analysis plots...')
         plot_training_curves(
-            history['train_loss'],
-            history['val_loss'],
-            history['train_acc'],
-            history['val_acc'],
+            history['train_loss'], history['val_loss'], history['train_acc'], history['val_acc'],
             save_path=os.path.join(plot_dir, 'training_curves.png'),
         )
-
         if best_val_preds and best_val_labels:
-            plot_per_class_error(
-                best_val_preds,
-                best_val_labels,
-                num_classes=num_classes,
-                save_path=os.path.join(plot_dir, 'error_dist.png'),
-            )
-            plot_long_tail_accuracy(
-                train_labels=train_dataset.targets,
-                val_preds=best_val_preds,
-                val_labels=best_val_labels,
-                num_classes=num_classes,
-                save_path=os.path.join(plot_dir, 'long_tail_acc.png'),
-            )
+            plot_per_class_error(best_val_preds, best_val_labels, num_classes=num_classes,
+                                 save_path=os.path.join(plot_dir, 'error_dist.png'))
+            plot_long_tail_accuracy(train_labels=train_dataset.targets, val_preds=best_val_preds, val_labels=best_val_labels,
+                                    num_classes=num_classes, save_path=os.path.join(plot_dir, 'long_tail_acc.png'))
 
     print(
-        f'\n✅ Training Completed. Best Val Acc: {best_val_acc:.2f}% | '
-        f'Total Time: {int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}'
-    )
+        f'\n✅ Training Completed. Best Val Acc: {best_val_acc:.2f}% | Total Time: {int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}')
 
 
 if __name__ == '__main__':
