@@ -280,7 +280,7 @@ def main():
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--save_dir", type=str,
-                        default="./Plot/Analysis_StagedLocalCrop_65th")
+                        default="./Plot/Analysis_StagedLocalCrop_best_loss_67th")
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--max_visualizations", type=int, default=80)
     parser.add_argument("--hard_pair_topk", type=int, default=20)
@@ -290,7 +290,8 @@ def main():
         config = json.load(f)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model_path = args.model_path if args.model_path is not None else config["best_model_path"]
+    model_path = args.model_path if args.model_path is not None else config[
+        "best_model_path"]
 
     val_transform = transforms.Compose([
         transforms.Resize(512),

@@ -167,15 +167,8 @@ def train_one_epoch(
     device,
     scaler,
 
-    stage_b_start_epoch=10,
-
-    stage_a_full_loss_weight=1.0,
-    stage_a_proto_diversity_weight=0.0,
-
-    stage_b_fused_loss_weight=1.0,
-    stage_b_full_loss_weight=0.5,
-    stage_b_local_loss_weight=0.05,
-    stage_b_proto_diversity_weight=0.0,
+    local1_view_weight=0.10,
+    proto_diversity_weight=0.0,
 
     local_crop_threshold=0.55,
     local_crop_padding_ratio=0.12,
@@ -191,7 +184,6 @@ def train_one_epoch(
     correct = 0
     total = 0
 
-    in_stage_b = epoch >= stage_b_start_epoch
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}", leave=False)
 
     for images, labels in pbar:
@@ -201,47 +193,30 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
         use_amp = (device.type == 'cuda')
 
+        local1_images = generate_cross_attention_bbox_local_view(
+            model=model,
+            images=images,
+            threshold_ratio=local_crop_threshold,
+            padding_ratio=local_crop_padding_ratio,
+            min_crop_ratio=local_min_crop_ratio,
+            max_crop_ratio=local_max_crop_ratio,
+            fallback_crop_ratio=local_fallback_crop_ratio,
+        )
+
         with torch.amp.autocast('cuda', enabled=use_amp):
-            if not in_stage_b:
-                # Stage A: only full/global backbone
-                full_logits = model(images)
+            outputs = model.forward_full_local(images, local1_images)
 
-                loss = stage_a_full_loss_weight * criterion(full_logits, labels)
+            fused_logits = outputs["fused_logits"]
+            local1_logits = outputs["local1_logits"]
 
-                if stage_a_proto_diversity_weight > 0:
-                    loss = loss + stage_a_proto_diversity_weight * model.prototype_diversity_loss()
+            loss = criterion(fused_logits, labels)
 
-                preds = torch.argmax(full_logits, dim=1)
+            if local1_view_weight > 0:
+                loss = loss + local1_view_weight * \
+                    criterion(local1_logits, labels)
 
-            else:
-                # Stage B: late local refinement
-                local1_images = generate_cross_attention_bbox_local_view(
-                    model=model,
-                    images=images,
-                    threshold_ratio=local_crop_threshold,
-                    padding_ratio=local_crop_padding_ratio,
-                    min_crop_ratio=local_min_crop_ratio,
-                    max_crop_ratio=local_max_crop_ratio,
-                    fallback_crop_ratio=local_fallback_crop_ratio,
-                )
-
-                outputs = model.forward_full_local(images, local1_images)
-                fused_logits = outputs["fused_logits"]
-                full_logits = outputs["full_logits"]
-                local1_logits = outputs["local1_logits"]
-
-                loss = stage_b_fused_loss_weight * criterion(fused_logits, labels)
-
-                if stage_b_full_loss_weight > 0:
-                    loss = loss + stage_b_full_loss_weight * criterion(full_logits, labels)
-
-                if stage_b_local_loss_weight > 0:
-                    loss = loss + stage_b_local_loss_weight * criterion(local1_logits, labels)
-
-                if stage_b_proto_diversity_weight > 0:
-                    loss = loss + stage_b_proto_diversity_weight * model.prototype_diversity_loss()
-
-                preds = torch.argmax(fused_logits, dim=1)
+            if proto_diversity_weight > 0:
+                loss = loss + proto_diversity_weight * model.prototype_diversity_loss()
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -250,13 +225,13 @@ def train_one_epoch(
         scaler.update()
 
         running_loss += loss.item() * images.size(0)
+        preds = torch.argmax(fused_logits, dim=1)
         correct += torch.sum(preds == labels).item()
         total += labels.size(0)
 
         pbar.set_postfix({
             "loss": f"{loss.item():.4f}",
-            "acc": f"{(correct / total) * 100:.2f}%",
-            "stage": "B" if in_stage_b else "A"
+            "acc": f"{(correct / total) * 100:.2f}%"
         })
 
     return running_loss / total, (correct / total) * 100
