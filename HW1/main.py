@@ -24,7 +24,7 @@ from torchvision import transforms
 cudnn.benchmark = True
 
 
-def     build_optimizer(model, lr_base):
+def build_optimizer(model, lr_base):
     return optim.AdamW(
         model.get_parameter_groups(lr_base),
         weight_decay=5e-4
@@ -82,10 +82,11 @@ def main():
 
     num_subcenters = config.get('num_subcenters', 3)
     embed_dim = config.get('embed_dim', 256)
-    local_view_weight = config.get('local_view_weight', 0.15)
-    local_view_source = config.get('local_view_source', 'saliency')
-    local_crop_threshold = config.get('local_crop_threshold', 0.60)
-    local_min_crop_ratio = config.get('local_min_crop_ratio', 0.35)
+    
+    local1_view_weight = config.get('local1_view_weight', 0.10)
+    local_crop_ratio = config.get('local_crop_ratio', 0.40)
+    local_crop_padding_ratio = config.get('local_crop_padding_ratio', 0.12)
+
 
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -217,9 +218,9 @@ def main():
         for epoch in range(start_epoch, num_epochs):
             print(f"\n--- Epoch {epoch + 1}/{num_epochs} ---")
             print(
-                "Stage 1 only | shuffle + CE(fused logits) + "
-                "attention-guided local crop view + "
-                "CLS Cross-Attention full/local token fusion"
+                " shuffle + CE(fused) + saliency-region bbox top-1 "
+                "local crops + 10~15% padding + CLS Cross-Attention fusion over "
+                "full + local1 "
             )
 
             train_loss, train_acc = train_one_epoch(
@@ -230,14 +231,13 @@ def main():
                 optimizer=optimizer,
                 device=device,
                 scaler=scaler,
-                local_view_weight=local_view_weight,
-                local_view_source=local_view_source,
-                local_crop_threshold=local_crop_threshold,
-                local_min_crop_ratio=local_min_crop_ratio
+                local1_view_weight=local1_view_weight,
+                local_crop_ratio=local_crop_ratio,
+                local_crop_padding_ratio=local_crop_padding_ratio,
             )
 
             val_loss, val_acc, val_preds, val_labels = validate_one_epoch(
-                model, val_loader, criterion_val, device
+                model, val_loader, criterion_val, device, config
             )
 
             scheduler.step()

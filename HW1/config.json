@@ -1,6 +1,6 @@
 {
   "batch_size": 16,
-  "num_epochs": 36,
+  "num_epochs": 30,
   "learning_rate": 8e-5,
   "num_classes": 100,
   "data_dir": "./Dataset/data",
@@ -11,8 +11,7 @@
   "early_stopping_patience": 30,
   "num_subcenters": 3,
   "embed_dim": 256,
-  "local_view_weight": 0.15,
-  "local_view_source": "saliency",
-  "local_crop_threshold": 0.55,
-  "local_min_crop_ratio": 0.40
+  "local1_view_weight": 0.1,
+  "local_crop_ratio": 0.40,
+  "local_crop_padding_ratio": 0.12
 }

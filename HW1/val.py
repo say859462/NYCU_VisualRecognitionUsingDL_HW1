@@ -1,27 +1,28 @@
 import torch
 from tqdm import tqdm
-from train import generate_attention_guided_local_view
+from train import generate_fast_top1_local_view
 
 
-def validate_one_epoch(model, val_loader, criterion, device):
+def validate_one_epoch(model, val_loader, criterion, device, config):
     model.eval()
     running_loss, correct_preds, total_preds = 0.0, 0, 0
     all_predictions, all_targets = [], []
 
     pbar = tqdm(val_loader, desc="Validating", leave=False, colour="green")
+
     with torch.no_grad():
         for images, labels in pbar:
-            images, labels = images.to(device), labels.to(device)
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
 
-            local_images = generate_attention_guided_local_view(
+            local1_views = generate_fast_top1_local_view(
                 model=model,
                 images=images,
-                source="saliency",
-                threshold_ratio=0.60,
-                min_crop_ratio=0.35,
+                crop_ratio=config['local_crop_ratio'],
+                padding_ratio=config['local_crop_padding_ratio']
             )
 
-            outputs = model.forward_full_local(images, local_images)
+            outputs = model.forward_full_local(images, local1_views)
             logits = outputs["fused_logits"]
 
             loss = criterion(logits, labels)

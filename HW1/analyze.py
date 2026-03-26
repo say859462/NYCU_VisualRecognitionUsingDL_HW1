@@ -13,7 +13,7 @@ from torchvision import transforms
 
 from dataset import ImageDataset
 from model import ImageClassificationModel
-from train import generate_attention_guided_local_view
+from train import generate_fast_top1_local_view
 
 
 # =========================================================
@@ -54,9 +54,8 @@ def run_analysis(
     model,
     val_loader,
     device,
-    local_view_source: str,
-    local_crop_threshold: float,
-    local_min_crop_ratio: float,
+    crop_ratio: float,
+    padding_ratio: float,
     save_dir: str,
     max_visualizations: int = 80,
     hard_pair_topk: int = 20,
@@ -74,18 +73,17 @@ def run_analysis(
 
     for batch_idx, batch in enumerate(val_loader):
         images, labels = batch
-        images = images.to(device)
-        labels = labels.to(device)
+        images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
 
         # -------------------------------------------------
-        # 1) generate local crop
+        # 1) generate local crop (latest exp: top-1 fast bbox crop)
         # -------------------------------------------------
-        local_images = generate_attention_guided_local_view(
+        local_images = generate_fast_top1_local_view(
             model=model,
             images=images,
-            source=local_view_source,
-            threshold_ratio=local_crop_threshold,
-            min_crop_ratio=local_min_crop_ratio,
+            crop_ratio=crop_ratio,
+            padding_ratio=padding_ratio,
         )
 
         # -------------------------------------------------
@@ -94,10 +92,10 @@ def run_analysis(
         # full-only
         full_logits = model(images)
 
-        # fused + local
+        # fused + local1
         outputs = model.forward_full_local(images, local_images)
         fused_logits = outputs["fused_logits"]
-        local_logits = outputs["local_logits"]
+        local_logits = outputs["local1_logits"]
 
         # probabilities
         full_probs = softmax_probs(full_logits)
@@ -328,12 +326,14 @@ def run_analysis(
 # =========================================================
 def main():
     parser = argparse.ArgumentParser(
-        description="Analyze local crop / full-local-fused behavior")
+        description="Analyze full / local / fused behavior under latest top-1 local crop setting"
+    )
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str,
                         default="./Model_Weight/best_model.pth")
-    parser.add_argument("--save_dir", type=str, default="./Analysis_LocalCrop_61th")
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--save_dir", type=str,
+                        default="./Plot/Analysis_LocalCrop_62th")
+    parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--max_visualizations", type=int, default=80)
     parser.add_argument("--hard_pair_topk", type=int, default=20)
     args = parser.parse_args()
@@ -384,9 +384,8 @@ def main():
         model=model,
         val_loader=val_loader,
         device=device,
-        local_view_source=config.get("local_view_source", "saliency"),
-        local_crop_threshold=config.get("local_crop_threshold", 0.60),
-        local_min_crop_ratio=config.get("local_min_crop_ratio", 0.35),
+        crop_ratio=config.get("local_crop_ratio", 0.40),
+        padding_ratio=config.get("local_crop_padding_ratio", 0.12),
         save_dir=args.save_dir,
         max_visualizations=args.max_visualizations,
         hard_pair_topk=args.hard_pair_topk,

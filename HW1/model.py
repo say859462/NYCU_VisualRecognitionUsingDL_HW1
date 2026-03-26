@@ -21,7 +21,7 @@ class GeM(nn.Module):
 
 
 class CrossAttentionBlock(nn.Module):
-    def __init__(self, dim, num_heads=4, mlp_ratio=4.0, dropout=0.1):
+    def __init__(self, dim, num_heads=4, mlp_ratio=4.0, dropout=0.2):
         super().__init__()
         self.num_heads = num_heads
         self.attn = nn.MultiheadAttention(
@@ -71,10 +71,6 @@ class CrossAttentionBlock(nn.Module):
 
 
 class SubCenterClassifier(nn.Module):
-    """
-    每個 class 有 K 個 sub-centers，logit 取 max over sub-centers
-    """
-
     def __init__(self, in_features, num_classes, num_subcenters=3, scale=16.0, learn_scale=True):
         super().__init__()
         self.in_features = in_features
@@ -299,9 +295,6 @@ class ImageClassificationModel(nn.Module):
         return outputs["logits"], outputs["attn_weights"]
 
     def get_cross_attention_map(self, x):
-        """
-        output: [B, 1, 4, 4]
-        """
         is_training = self.training
         self.eval()
         with torch.no_grad():
@@ -315,14 +308,17 @@ class ImageClassificationModel(nn.Module):
         outputs = self.forward_view(x, return_attn=False)
         return outputs["logits"]
 
-    def forward_full_local(self, full_x, local_x):
+    def forward_full_local(self, full_x, local1_x, local2_x=None):
         full_outputs = self.forward_view(full_x, return_attn=False)
-        local_outputs = self.forward_view(local_x, return_attn=False)
+        local1_outputs = self.forward_view(local1_x, return_attn=False)
 
-        fused_tokens = torch.cat(
-            [full_outputs["tokens"], local_outputs["tokens"]],
-            dim=1
-        )
+        all_tokens = [full_outputs["tokens"], local1_outputs["tokens"]]
+        local2_outputs = None
+        if local2_x is not None:
+            local2_outputs = self.forward_view(local2_x, return_attn=False)
+            all_tokens.append(local2_outputs["tokens"])
+
+        fused_tokens = torch.cat(all_tokens, dim=1)
         fused_cls = self.cls_cross_attention_from_tokens(
             fused_tokens, return_attn=False
         )
@@ -333,13 +329,16 @@ class ImageClassificationModel(nn.Module):
         return {
             "fused_logits": fused_logits,
             "full_logits": full_outputs["logits"],
-            "local_logits": local_outputs["logits"],
+            "local1_logits": local1_outputs["logits"],
+            "local2_logits": None if local2_outputs is None else local2_outputs["logits"],
             "fused_embed": fused_embed,
             "full_embed": full_outputs["embed"],
-            "local_embed": local_outputs["embed"],
+            "local1_embed": local1_outputs["embed"],
+            "local2_embed": None if local2_outputs is None else local2_outputs["embed"],
             "fused_logits_all": fused_logits_all,
             "full_logits_all": full_outputs["logits_all"],
-            "local_logits_all": local_outputs["logits_all"],
+            "local1_logits_all": local1_outputs["logits_all"],
+            "local2_logits_all": None if local2_outputs is None else local2_outputs["logits_all"],
         }
 
     def get_saliency(self, x):

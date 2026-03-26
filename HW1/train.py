@@ -3,84 +3,75 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 
-def generate_attention_guided_local_view(
+def _build_box_from_peak(cy, cx, crop_h, crop_w, pad_h, pad_w, H, W, device):
+    y1 = cy - crop_h // 2 - pad_h
+    y2 = cy + crop_h // 2 + pad_h
+    x1 = cx - crop_w // 2 - pad_w
+    x2 = cx + crop_w // 2 + pad_w
+
+    y1 = torch.clamp(y1, 0, H - 1)
+    x1 = torch.clamp(x1, 0, W - 1)
+    y2 = torch.clamp(y2, y1 + 1, H)
+    x2 = torch.clamp(x2, x1 + 1, W)
+
+    return torch.stack([
+        y1.to(device=device, dtype=torch.long),
+        x1.to(device=device, dtype=torch.long),
+        y2.to(device=device, dtype=torch.long),
+        x2.to(device=device, dtype=torch.long),
+    ])
+
+
+def generate_fast_top1_local_view(
     model,
     images,
-    source="saliency",
-    threshold_ratio=0.60,
-    min_crop_ratio=0.35,
-    padding_ratio=0.15,
+    crop_ratio=0.40,
+    padding_ratio=0.12,
 ):
+    """
+    Fast GPU-based top-1 saliency crop.
+    用 saliency peak 建立單一 local bounding box，不做 CPU 搜索。
+    """
     with torch.no_grad():
-        if source == "cross_attention":
-            response_map = model.get_cross_attention_map(images)
-        else:
-            response_map = model.get_saliency(images).unsqueeze(1)
-
+        response_map = model.get_saliency(images)  # (B, h, w)
         response_map = F.interpolate(
-            response_map,
+            response_map.unsqueeze(1),
             size=images.shape[-2:],
             mode='bilinear',
             align_corners=False
+        ).squeeze(1)
+
+    B, H, W = response_map.shape
+    device = images.device
+
+    crop_h = max(2, int(H * crop_ratio))
+    crop_w = max(2, int(W * crop_ratio))
+    pad_h = max(1, int(crop_h * padding_ratio))
+    pad_w = max(1, int(crop_w * padding_ratio))
+
+    flat = response_map.view(B, -1)
+    top1_idx = torch.argmax(flat, dim=1)
+
+    ys = top1_idx // W
+    xs = top1_idx % W
+
+    local_list = []
+
+    for b in range(B):
+        box = _build_box_from_peak(
+            ys[b], xs[b], crop_h, crop_w, pad_h, pad_w, H, W, device
         )
 
-    batch_size, _, height, width = images.shape
-    min_crop_h = max(2, int(height * min_crop_ratio))
-    min_crop_w = max(2, int(width * min_crop_ratio))
-    local_views = []
+        y1, x1, y2, x2 = [int(v.item()) for v in box]
 
-    for idx in range(batch_size):
-        attn_map = response_map[idx, 0]
-        threshold = attn_map.max() * threshold_ratio
-        mask = attn_map >= threshold
-        nonzero = torch.nonzero(mask, as_tuple=False)
-
-        if nonzero.numel() == 0:
-            center_y, center_x = height // 2, width // 2
-            crop_h = min_crop_h
-            crop_w = min_crop_w
-            y1 = max(0, center_y - crop_h // 2)
-            y2 = min(height, center_y + crop_h // 2)
-            x1 = max(0, center_x - crop_w // 2)
-            x2 = min(width, center_x + crop_w // 2)
-        else:
-            y1 = int(nonzero[:, 0].min().item())
-            y2 = int(nonzero[:, 0].max().item()) + 1
-            x1 = int(nonzero[:, 1].min().item())
-            x2 = int(nonzero[:, 1].max().item()) + 1
-
-            box_h = y2 - y1
-            box_w = x2 - x1
-            pad_h = int(box_h * padding_ratio)
-            pad_w = int(box_w * padding_ratio)
-
-            y1 = max(0, y1 - pad_h)
-            y2 = min(height, y2 + pad_h)
-            x1 = max(0, x1 - pad_w)
-            x2 = min(width, x2 + pad_w)
-
-            if (y2 - y1) < min_crop_h:
-                center_y = (y1 + y2) // 2
-                y1 = max(0, center_y - min_crop_h // 2)
-                y2 = min(height, y1 + min_crop_h)
-                y1 = max(0, y2 - min_crop_h)
-
-            if (x2 - x1) < min_crop_w:
-                center_x = (x1 + x2) // 2
-                x1 = max(0, center_x - min_crop_w // 2)
-                x2 = min(width, x1 + min_crop_w)
-                x1 = max(0, x2 - min_crop_w)
-
-        crop = images[idx:idx + 1, :, y1:y2, x1:x2]
+        crop = images[b:b + 1, :, y1:y2, x1:x2]
         crop = F.interpolate(
-            crop,
-            size=(height, width),
-            mode='bilinear',
-            align_corners=False
+            crop, size=(H, W), mode='bilinear', align_corners=False
         )
-        local_views.append(crop)
+        local_list.append(crop)
 
-    return torch.cat(local_views, dim=0)
+    local = torch.cat(local_list, dim=0)
+    return local
 
 
 def train_one_epoch(
@@ -91,10 +82,9 @@ def train_one_epoch(
     optimizer,
     device,
     scaler,
-    local_view_weight=0.15,
-    local_view_source="saliency",
-    local_crop_threshold=0.60,
-    local_min_crop_ratio=0.35,
+    local1_view_weight=0.10,
+    local_crop_ratio=0.40,
+    local_crop_padding_ratio=0.12,
     max_grad_norm=5.0,
 ):
     model.train()
@@ -106,29 +96,28 @@ def train_one_epoch(
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}", leave=False)
 
     for images, labels in pbar:
-        images = images.to(device)
-        labels = labels.to(device)
+        images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
 
-        local_images = generate_attention_guided_local_view(
+        local1_images = generate_fast_top1_local_view(
             model=model,
             images=images,
-            source=local_view_source,
-            threshold_ratio=local_crop_threshold,
-            min_crop_ratio=local_min_crop_ratio,
+            crop_ratio=local_crop_ratio,
+            padding_ratio=local_crop_padding_ratio,
         )
 
         use_amp = (device.type == 'cuda')
         with torch.amp.autocast('cuda', enabled=use_amp):
-            outputs = model.forward_full_local(images, local_images)
+            outputs = model.forward_full_local(images, local1_images)
             fused_logits = outputs["fused_logits"]
-            local_logits = outputs["local_logits"]
+            local1_logits = outputs["local1_logits"]
 
             loss = criterion(fused_logits, labels)
-            if local_view_weight > 0:
-                loss = loss + local_view_weight * \
-                    criterion(local_logits, labels)
+
+            if local1_view_weight > 0:
+                loss = loss + local1_view_weight * criterion(local1_logits, labels)
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
