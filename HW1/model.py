@@ -72,7 +72,7 @@ class PMGHead(nn.Module):
         return logits, embed, logits_all
 
 
-class CLSAggregator(nn.Module):
+class SpatialCLSAggregator(nn.Module):
     def __init__(
         self,
         embed_dim,
@@ -82,12 +82,18 @@ class CLSAggregator(nn.Module):
         attn_dropout=0.1,
         ffn_ratio=2.0,
         block_dropout=0.1,
+        num_levels=3,
+        tokens_per_level=49,
     ):
         super().__init__()
         self.embed_dim = embed_dim
+        self.tokens_per_level = tokens_per_level
+        self.num_levels = num_levels
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.type_embed = nn.Parameter(torch.zeros(1, 4, embed_dim))
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, tokens_per_level, embed_dim))
+        self.level_embed = nn.Parameter(torch.zeros(1, num_levels, embed_dim))
 
         self.norm1 = nn.LayerNorm(embed_dim)
         self.attn = nn.MultiheadAttention(
@@ -120,21 +126,26 @@ class CLSAggregator(nn.Module):
 
     def reset_parameters(self):
         nn.init.trunc_normal_(self.cls_token, std=0.02)
-        nn.init.trunc_normal_(self.type_embed, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.level_embed, std=0.02)
 
-    def forward(self, global_embed, part2_embed, part4_embed):
-        bsz = global_embed.size(0)
+    def forward(self, tokens_l2, tokens_l3, tokens_l4):
+        # tokens_* shape: [B, 49, D]
+        bsz = tokens_l2.size(0)
 
+        tokens_l2 = tokens_l2 + self.pos_embed + self.level_embed[:, 0:1, :]
+        tokens_l3 = tokens_l3 + self.pos_embed + self.level_embed[:, 1:2, :]
+        tokens_l4 = tokens_l4 + self.pos_embed + self.level_embed[:, 2:3, :]
+
+        spatial_tokens = torch.cat(
+            [tokens_l2, tokens_l3, tokens_l4], dim=1)  # [B, 147, D]
         cls = self.cls_token.expand(bsz, -1, -1)
-        tokens = torch.stack([global_embed, part2_embed, part4_embed], dim=1)
-        x = torch.cat([cls, tokens], dim=1)  # [B, 4, D]
-        x = x + self.type_embed
+        x = torch.cat([cls, spatial_tokens], dim=1)  # [B, 148, D]
 
         x_norm = self.norm1(x)
         attn_out, attn_weights = self.attn(
             x_norm, x_norm, x_norm, need_weights=True)
         x = x + self.drop1(attn_out)
-
         x = x + self.ffn(self.norm2(x))
 
         cls_out = x[:, 0]
@@ -149,12 +160,16 @@ class ImageClassificationModel(nn.Module):
         pretrained=True,
         num_subcenters=3,
         embed_dim=256,
+        token_grid_size=7,
         cls_num_heads=4,
         cls_attn_dropout=0.1,
         cls_ffn_ratio=2.0,
         cls_block_dropout=0.1,
     ):
         super().__init__()
+
+        self.embed_dim = embed_dim
+        self.token_grid_size = token_grid_size
 
         resnet = models.resnet152(
             weights=models.ResNet152_Weights.DEFAULT if pretrained else None
@@ -168,6 +183,7 @@ class ImageClassificationModel(nn.Module):
         self.layer3 = resnet.layer3
         self.layer4 = resnet.layer4
 
+        # Original PMG path
         self.proj_l3 = nn.Sequential(
             nn.Conv2d(1024, 256, kernel_size=1, bias=False),
             nn.BatchNorm2d(256),
@@ -184,6 +200,25 @@ class ImageClassificationModel(nn.Module):
             nn.ReLU(inplace=True),
         )
 
+        # Spatial token path
+        self.proj_l2_token = nn.Sequential(
+            nn.Conv2d(512, embed_dim, kernel_size=1, bias=False),
+            nn.BatchNorm2d(embed_dim),
+            nn.ReLU(inplace=True),
+        )
+        self.proj_l3_token = nn.Sequential(
+            nn.Conv2d(1024, embed_dim, kernel_size=1, bias=False),
+            nn.BatchNorm2d(embed_dim),
+            nn.ReLU(inplace=True),
+        )
+        self.proj_l4_token = nn.Sequential(
+            nn.Conv2d(2048, embed_dim, kernel_size=1, bias=False),
+            nn.BatchNorm2d(embed_dim),
+            nn.ReLU(inplace=True),
+        )
+        self.token_pool = nn.AdaptiveAvgPool2d(
+            (token_grid_size, token_grid_size))
+
         self.gem = GeM(p=3.0, learn_p=True)
         self.pool_2 = nn.AdaptiveAvgPool2d((2, 2))
         self.pool_4 = nn.AdaptiveAvgPool2d((4, 4))
@@ -197,7 +232,7 @@ class ImageClassificationModel(nn.Module):
         self.concat_head = PMGHead(
             embed_dim * 3, embed_dim, num_classes, num_subcenters, dropout=0.3)
 
-        self.cls_aggregator = CLSAggregator(
+        self.cls_aggregator = SpatialCLSAggregator(
             embed_dim=embed_dim,
             num_classes=num_classes,
             num_subcenters=num_subcenters,
@@ -205,6 +240,8 @@ class ImageClassificationModel(nn.Module):
             attn_dropout=cls_attn_dropout,
             ffn_ratio=cls_ffn_ratio,
             block_dropout=cls_block_dropout,
+            num_levels=3,
+            tokens_per_level=token_grid_size * token_grid_size,
         )
 
         self._freeze_shallow_layers()
@@ -217,7 +254,9 @@ class ImageClassificationModel(nn.Module):
 
         for module in [
             self.layer2, self.layer3, self.layer4,
-            self.proj_l3, self.proj_l4, self.fuse, self.gem,
+            self.proj_l3, self.proj_l4, self.fuse,
+            self.proj_l2_token, self.proj_l3_token, self.proj_l4_token,
+            self.gem,
             self.global_head, self.part2_head, self.part4_head,
             self.concat_head, self.cls_aggregator
         ]:
@@ -225,7 +264,10 @@ class ImageClassificationModel(nn.Module):
                 p.requires_grad = True
 
     def _init_new_layers(self):
-        for module in [self.proj_l3, self.proj_l4, self.fuse]:
+        for module in [
+            self.proj_l3, self.proj_l4, self.fuse,
+            self.proj_l2_token, self.proj_l3_token, self.proj_l4_token
+        ]:
             for m in module.modules():
                 if isinstance(m, nn.Conv2d):
                     nn.init.kaiming_normal_(
@@ -236,13 +278,15 @@ class ImageClassificationModel(nn.Module):
 
     def check_parameters(self):
         total = sum(p.numel() for p in self.parameters())
-        print(f"The number of parameter is {total}")
+        print(f"Parameters : {total}")
         return total < 100_000_000
 
     def get_parameter_groups(self, lr_base):
         head_params = []
         for module in [
-            self.proj_l3, self.proj_l4, self.fuse, self.gem,
+            self.proj_l3, self.proj_l4, self.fuse,
+            self.proj_l2_token, self.proj_l3_token, self.proj_l4_token,
+            self.gem,
             self.global_head, self.part2_head, self.part4_head,
             self.concat_head, self.cls_aggregator
         ]:
@@ -262,21 +306,23 @@ class ImageClassificationModel(nn.Module):
     def forward_features(self, x):
         x = self.stem(x)
         x = self.layer1(x)
-        x = self.layer2(x)
-
-        feat_l3 = self.layer3(x)
+        feat_l2 = self.layer2(x)
+        feat_l3 = self.layer3(feat_l2)
         feat_l4 = self.layer4(feat_l3)
 
-        feat_l3 = self.proj_l3(feat_l3)
-        feat_l4 = self.proj_l4(feat_l4)
+        feat_l3_proj = self.proj_l3(feat_l3)
+        feat_l4_proj = self.proj_l4(feat_l4)
 
-        feat_l3 = F.adaptive_avg_pool2d(feat_l3, feat_l4.shape[-2:])
-        fused_map = self.fuse(torch.cat([feat_l3, feat_l4], dim=1))
-        return fused_map
+        feat_l3_proj = F.adaptive_avg_pool2d(
+            feat_l3_proj, feat_l4_proj.shape[-2:])
+        fused_map = self.fuse(torch.cat([feat_l3_proj, feat_l4_proj], dim=1))
+
+        return feat_l2, feat_l3, feat_l4, fused_map
 
     def forward_pmg(self, x, return_attn=False):
-        fused_map = self.forward_features(x)
+        feat_l2, feat_l3, feat_l4, fused_map = self.forward_features(x)
 
+        # Original PMG heads
         global_feat = self.gem(fused_map)
         part2_feat = self.pool_2(fused_map).flatten(1)
         part4_feat = self.pool_4(fused_map).flatten(1)
@@ -293,8 +339,16 @@ class ImageClassificationModel(nn.Module):
         concat_logits, concat_embed, concat_logits_all = self.concat_head(
             concat_feat)
 
+        # Spatial token path
+        tokens_l2 = self.token_pool(self.proj_l2_token(
+            feat_l2)).flatten(2).transpose(1, 2)
+        tokens_l3 = self.token_pool(self.proj_l3_token(
+            feat_l3)).flatten(2).transpose(1, 2)
+        tokens_l4 = self.token_pool(self.proj_l4_token(
+            feat_l4)).flatten(2).transpose(1, 2)
+
         cls_logits, cls_embed, cls_logits_all, attn_weights = self.cls_aggregator(
-            global_embed, part2_embed, part4_embed
+            tokens_l2, tokens_l3, tokens_l4
         )
 
         outputs = {
@@ -315,6 +369,10 @@ class ImageClassificationModel(nn.Module):
             "part4_logits_all": part4_logits_all,
             "concat_logits_all": concat_logits_all,
             "cls_logits_all": cls_logits_all,
+
+            "tokens_l2": tokens_l2,
+            "tokens_l3": tokens_l3,
+            "tokens_l4": tokens_l4,
         }
         if return_attn:
             outputs["cls_attn_weights"] = attn_weights
@@ -350,3 +408,15 @@ class ImageClassificationModel(nn.Module):
         if count == 0:
             return torch.tensor(0.0, device=self.global_head.classifier.weight.device)
         return total_loss / count
+
+    def get_saliency(self, x):
+        _, _, _, fused_map = self.forward_features(x)
+        saliency = fused_map.pow(2).mean(dim=1, keepdim=True)
+        saliency = F.interpolate(
+            saliency,
+            size=x.shape[-2:],
+            mode="bicubic",
+            align_corners=False,
+        )
+        saliency = F.avg_pool2d(saliency, kernel_size=9, stride=1, padding=4)
+        return saliency.squeeze(1)

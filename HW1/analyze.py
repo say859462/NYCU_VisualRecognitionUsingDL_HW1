@@ -20,11 +20,11 @@ def compute_accuracy(preds, labels):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PMG / CLS analysis")
+    parser = argparse.ArgumentParser(description="PMG / Spatial CLS analysis")
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--save_dir", type=str,
-                        default="./Plot/Analysis_PMG_CLS_76th")
+                        default="./Plot/Analysis_Spatial_CLS")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
@@ -60,6 +60,7 @@ def main():
         pretrained=False,
         num_subcenters=config.get("num_subcenters", 3),
         embed_dim=config.get("embed_dim", 256),
+        token_grid_size=config.get("token_grid_size", 7),
         cls_num_heads=config.get("cls_num_heads", 4),
         cls_attn_dropout=config.get("cls_attn_dropout", 0.1),
         cls_ffn_ratio=config.get("cls_ffn_ratio", 2.0),

@@ -141,6 +141,7 @@ def main():
         pretrained=True,
         num_subcenters=num_subcenters,
         embed_dim=embed_dim,
+        token_grid_size=config.get("token_grid_size", 7),
         cls_num_heads=config.get("cls_num_heads", 4),
         cls_attn_dropout=config.get("cls_attn_dropout", 0.1),
         cls_ffn_ratio=config.get("cls_ffn_ratio", 2.0),

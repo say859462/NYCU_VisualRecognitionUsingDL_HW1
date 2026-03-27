@@ -14,19 +14,13 @@ from tqdm import tqdm
 from model import ImageClassificationModel
 
 
-def _denorm_image(img_tensor):
-    img = img_tensor.detach().cpu()
-    img = img * torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-    img = img + torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-    img = torch.clamp(img, 0.0, 1.0)
-    return img.permute(1, 2, 0).numpy()
+def _normalize_map(x: np.ndarray) -> np.ndarray:
+    x = x - x.min()
+    x = x / (x.max() + 1e-8)
+    return x
 
 
-def _overlay_heatmap_on_image(rgb_img, heatmap, alpha=0.45):
-    """
-    rgb_img: HWC float [0,1]
-    heatmap: HW float [0,1]
-    """
+def _overlay_heatmap_on_image(rgb_img: np.ndarray, heatmap: np.ndarray, alpha: float = 0.45) -> np.ndarray:
     cmap = plt.get_cmap("jet")
     heatmap_color = cmap(heatmap)[..., :3]
     overlay = (1 - alpha) * rgb_img + alpha * heatmap_color
@@ -34,18 +28,11 @@ def _overlay_heatmap_on_image(rgb_img, heatmap, alpha=0.45):
     return overlay
 
 
-def _normalize_map(x):
-    x = x - x.min()
-    x = x / (x.max() + 1e-8)
-    return x
+def _fmt_pred(name, probs, pred_idx):
+    return f"{name}:{pred_idx} ({probs[pred_idx].item():.2f})"
 
 
 def compute_cls_gradcam(model, input_tensor):
-    """
-    對當前 self-attention / CLS token 版本：
-    以 cls_logits 的 top-1 類別作為 target，
-    對 fused_map 做 Grad-CAM。
-    """
     model.eval()
 
     activations = []
@@ -57,7 +44,6 @@ def compute_cls_gradcam(model, input_tensor):
     def backward_hook(module, grad_input, grad_output):
         gradients.append(grad_output[0])
 
-    # 對 fuse 的輸出做 hook
     handle_fwd = model.fuse.register_forward_hook(forward_hook)
     handle_bwd = model.fuse.register_full_backward_hook(backward_hook)
 
@@ -72,11 +58,11 @@ def compute_cls_gradcam(model, input_tensor):
         model.zero_grad(set_to_none=True)
         score.backward()
 
-        feat = activations[0]          # [1, C, H, W]
-        grad = gradients[0]            # [1, C, H, W]
+        feat = activations[0]
+        grad = gradients[0]
 
-        weights = grad.mean(dim=(2, 3), keepdim=True)   # [1, C, 1, 1]
-        cam = (weights * feat).sum(dim=1, keepdim=True)  # [1, 1, H, W]
+        weights = grad.mean(dim=(2, 3), keepdim=True)
+        cam = (weights * feat).sum(dim=1, keepdim=True)
         cam = F.relu(cam)
         cam = F.interpolate(
             cam, size=input_tensor.shape[-2:], mode="bilinear", align_corners=False)
@@ -90,8 +76,40 @@ def compute_cls_gradcam(model, input_tensor):
         handle_bwd.remove()
 
 
-def _fmt_pred(name, probs, pred_idx):
-    return f"{name}:{pred_idx} ({probs[pred_idx].item():.2f})"
+def _get_spatial_attn_maps(attn_tensor, token_grid_size=7):
+    """
+    attn_tensor:
+      - [B, H, T, T] or
+      - [B, T, T]
+    token order:
+      [CLS] + [L2 49] + [L3 49] + [L4 49]
+    """
+    if attn_tensor.dim() == 4:
+        attn_map = attn_tensor[0].mean(dim=0)  # [T, T]
+    else:
+        attn_map = attn_tensor[0]              # [T, T]
+
+    cls_to_all = attn_map[0].detach().cpu().numpy()  # [148]
+    cls_to_spatial = cls_to_all[1:]                  # [147]
+
+    n = token_grid_size * token_grid_size
+    attn_l2 = cls_to_spatial[:n].reshape(token_grid_size, token_grid_size)
+    attn_l3 = cls_to_spatial[n:2 * n].reshape(token_grid_size, token_grid_size)
+    attn_l4 = cls_to_spatial[2 * n:3 *
+                             n].reshape(token_grid_size, token_grid_size)
+
+    attn_l2 = _normalize_map(attn_l2)
+    attn_l3 = _normalize_map(attn_l3)
+    attn_l4 = _normalize_map(attn_l4)
+
+    level_weights = np.array([
+        cls_to_spatial[:n].sum(),
+        cls_to_spatial[n:2 * n].sum(),
+        cls_to_spatial[2 * n:3 * n].sum(),
+    ], dtype=np.float32)
+    level_weights = level_weights / (level_weights.sum() + 1e-8)
+
+    return attn_l2, attn_l3, attn_l4, level_weights
 
 
 def main():
@@ -101,7 +119,7 @@ def main():
     parser.add_argument("--num_samples_per_class", type=int, default=3)
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--save_dir", type=str,
-                        default="./Plot/Attention_Outputs/current_cls_76th")
+                        default="./Plot/Attention_Outputs/spatial_cls")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -111,6 +129,8 @@ def main():
 
     with open(args.config, "r") as f:
         config = json.load(f)
+
+    token_grid_size = config.get("token_grid_size", 7)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.save_dir, exist_ok=True)
@@ -122,6 +142,7 @@ def main():
         pretrained=False,
         num_subcenters=config.get("num_subcenters", 3),
         embed_dim=config.get("embed_dim", 256),
+        token_grid_size=token_grid_size,
         cls_num_heads=config.get("cls_num_heads", 4),
         cls_attn_dropout=config.get("cls_attn_dropout", 0.1),
         cls_ffn_ratio=config.get("cls_ffn_ratio", 2.0),
@@ -170,7 +191,6 @@ def main():
             cam, cls_pred, cls_probs, outputs = compute_cls_gradcam(
                 model, input_tensor)
 
-            # 也拿舊 PMG heads 的預測做對照
             with torch.no_grad():
                 global_probs = torch.softmax(
                     outputs["global_logits"], dim=1)[0].cpu()
@@ -186,29 +206,48 @@ def main():
                 part4_pred = int(part4_probs.argmax().item())
                 concat_pred = int(concat_probs.argmax().item())
 
-                # cls_attn_weights: [B, num_heads, T, T] 或 [B, T, T] 視 pytorch 版本而定
-                attn = outputs["cls_attn_weights"]
-                if attn.dim() == 4:
-                    # [B, H, T, T]
-                    attn_map = attn[0].mean(dim=0)  # [T, T]
-                else:
-                    # [B, T, T]
-                    attn_map = attn[0]
+                attn_l2, attn_l3, attn_l4, level_weights = _get_spatial_attn_maps(
+                    outputs["cls_attn_weights"], token_grid_size=token_grid_size
+                )
 
-                # token 順序: [CLS, global, part2, part4]
-                cls_to_tokens = attn_map[0].detach().cpu().numpy()
-                # 我們只看 CLS 對 branch tokens 的注意力，不看自己
-                branch_attn = cls_to_tokens[1:4]
-                branch_attn = branch_attn / (branch_attn.sum() + 1e-8)
+                attn_l2_up = F.interpolate(
+                    torch.tensor(attn_l2).unsqueeze(0).unsqueeze(0),
+                    size=(rgb_img.shape[0], rgb_img.shape[1]),
+                    mode="bilinear",
+                    align_corners=False,
+                )[0, 0].numpy()
+                attn_l3_up = F.interpolate(
+                    torch.tensor(attn_l3).unsqueeze(0).unsqueeze(0),
+                    size=(rgb_img.shape[0], rgb_img.shape[1]),
+                    mode="bilinear",
+                    align_corners=False,
+                )[0, 0].numpy()
+                attn_l4_up = F.interpolate(
+                    torch.tensor(attn_l4).unsqueeze(0).unsqueeze(0),
+                    size=(rgb_img.shape[0], rgb_img.shape[1]),
+                    mode="bilinear",
+                    align_corners=False,
+                )[0, 0].numpy()
 
-            overlay = _overlay_heatmap_on_image(rgb_img, cam, alpha=0.45)
+            gradcam_overlay = _overlay_heatmap_on_image(
+                rgb_img, cam, alpha=0.45)
+            l2_overlay = _overlay_heatmap_on_image(
+                rgb_img, attn_l2_up, alpha=0.40)
+            l3_overlay = _overlay_heatmap_on_image(
+                rgb_img, attn_l3_up, alpha=0.40)
+            l4_overlay = _overlay_heatmap_on_image(
+                rgb_img, attn_l4_up, alpha=0.40)
 
-            fig = plt.figure(figsize=(16, 5))
-            gs = fig.add_gridspec(1, 3, width_ratios=[1.0, 1.0, 0.8])
+            fig = plt.figure(figsize=(20, 8))
+            gs = fig.add_gridspec(2, 3, height_ratios=[
+                                  1.0, 1.0], width_ratios=[1.0, 1.0, 1.0])
 
             ax0 = fig.add_subplot(gs[0, 0])
             ax1 = fig.add_subplot(gs[0, 1])
             ax2 = fig.add_subplot(gs[0, 2])
+            ax3 = fig.add_subplot(gs[1, 0])
+            ax4 = fig.add_subplot(gs[1, 1])
+            ax5 = fig.add_subplot(gs[1, 2])
 
             cls_conf = float(cls_probs[cls_pred].item())
             title_color = "green" if str(cls_pred) == str(class_id) else "red"
@@ -231,19 +270,30 @@ def main():
             ax0.axis("off")
             ax0.set_title("Original")
 
-            ax1.imshow(overlay)
+            ax1.imshow(gradcam_overlay)
             ax1.axis("off")
             ax1.set_title("CLS Grad-CAM")
 
-            branch_names = ["Global", "Part2", "Part4"]
-            ax2.bar(branch_names, branch_attn)
+            ax2.bar(["L2", "L3", "L4"], level_weights)
             ax2.set_ylim(0, 1.0)
-            ax2.set_title("CLS → Branch Attention")
-            for i, v in enumerate(branch_attn):
+            ax2.set_title("CLS → Level Attention")
+            for i, v in enumerate(level_weights):
                 ax2.text(i, float(v) + 0.02,
                          f"{v:.2f}", ha="center", va="bottom")
 
-            save_name = f"cls_attn_{os.path.splitext(os.path.basename(img_path))[0]}.png"
+            ax3.imshow(l2_overlay)
+            ax3.axis("off")
+            ax3.set_title("CLS → L2 Tokens")
+
+            ax4.imshow(l3_overlay)
+            ax4.axis("off")
+            ax4.set_title("CLS → L3 Tokens")
+
+            ax5.imshow(l4_overlay)
+            ax5.axis("off")
+            ax5.set_title("CLS → L4 Tokens")
+
+            save_name = f"spatial_cls_attn_{os.path.splitext(os.path.basename(img_path))[0]}.png"
             plt.tight_layout()
             plt.savefig(os.path.join(class_save_dir, save_name),
                         bbox_inches="tight")

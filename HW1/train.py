@@ -24,12 +24,12 @@ def _get_stage_weights(epoch, stage1_epochs, stage2_epochs, config):
         }
 
     return {
-        "stage_name": "Stage 3 | Full PMG + CLS aggregator",
+        "stage_name": "Stage 3 | Full PMG + Spatial CLS aggregator",
         "global_weight": config.get("pmg_stage3_global_weight", 1.0),
         "part2_weight": config.get("pmg_stage3_part2_weight", 0.5),
         "part4_weight": config.get("pmg_stage3_part4_weight", 0.5),
         "concat_weight": config.get("pmg_stage3_concat_weight", 1.0),
-        "cls_weight": config.get("pmg_stage3_cls_weight", 1.0),
+        "cls_weight": config.get("pmg_stage3_cls_weight", 0.3),
     }
 
 
@@ -82,8 +82,8 @@ def train_one_epoch(
 
     stage_cfg = _get_stage_weights(
         epoch=epoch,
-        stage1_epochs=config.get("pmg_stage1_epochs", 4),
-        stage2_epochs=config.get("pmg_stage2_epochs", 4),
+        stage1_epochs=config.get("pmg_stage1_epochs", 5),
+        stage2_epochs=config.get("pmg_stage2_epochs", 5),
         config=config,
     )
 

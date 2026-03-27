@@ -16,8 +16,8 @@ def validate_one_epoch(model, val_loader, criterion, device, config, epoch):
 
     stage_cfg = _get_stage_weights(
         epoch=epoch,
-        stage1_epochs=config.get("pmg_stage1_epochs", 4),
-        stage2_epochs=config.get("pmg_stage2_epochs", 4),
+        stage1_epochs=config.get("pmg_stage1_epochs", 5),
+        stage2_epochs=config.get("pmg_stage2_epochs", 5),
         config=config,
     )
 

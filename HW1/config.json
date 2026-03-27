@@ -1,7 +1,7 @@
 {
   "batch_size": 16,
   "num_epochs": 25,
-  "learning_rate": 8e-5,
+  "learning_rate": 6e-5,
   "num_classes": 100,
   "data_dir": "./Dataset/data",
 
@@ -31,8 +31,9 @@
   "pmg_stage3_part2_weight": 0.5,
   "pmg_stage3_part4_weight": 0.5,
   "pmg_stage3_concat_weight": 1.0,
-  "pmg_stage3_cls_weight": 0.5,
+  "pmg_stage3_cls_weight": 0.3,
 
+  "token_grid_size": 7,
   "cls_num_heads": 4,
   "cls_attn_dropout": 0.1,
   "cls_ffn_ratio": 2.0,
