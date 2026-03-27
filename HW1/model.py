@@ -236,6 +236,7 @@ class ImageClassificationModel(nn.Module):
 
     def check_parameters(self):
         total = sum(p.numel() for p in self.parameters())
+        print(f"The number of parameter is {total}")
         return total < 100_000_000
 
     def get_parameter_groups(self, lr_base):

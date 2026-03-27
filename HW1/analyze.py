@@ -24,7 +24,7 @@ def main():
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--save_dir", type=str,
-                        default="./Plot/Analysis_PMG_CLS")
+                        default="./Plot/Analysis_PMG_CLS_76th")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:

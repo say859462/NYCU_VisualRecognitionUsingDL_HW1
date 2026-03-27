@@ -1,7 +1,7 @@
 {
   "batch_size": 16,
   "num_epochs": 25,
-  "learning_rate": 6e-5,
+  "learning_rate": 8e-5,
   "num_classes": 100,
   "data_dir": "./Dataset/data",
 
@@ -16,8 +16,8 @@
   "embed_dim": 256,
   "proto_diversity_weight": 0.0,
 
-  "pmg_stage1_epochs": 4,
-  "pmg_stage2_epochs": 4,
+  "pmg_stage1_epochs": 5,
+  "pmg_stage2_epochs": 5,
 
   "pmg_stage1_global_weight": 1.0,
 
