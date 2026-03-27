@@ -10,7 +10,6 @@ def _get_stage_weights(epoch, stage1_epochs, stage2_epochs, config):
             "part2_weight": 0.0,
             "part4_weight": 0.0,
             "concat_weight": 0.0,
-            "cls_weight": 0.0,
         }
 
     if epoch <= stage1_epochs + stage2_epochs:
@@ -20,16 +19,14 @@ def _get_stage_weights(epoch, stage1_epochs, stage2_epochs, config):
             "part2_weight": config.get("pmg_stage2_part2_weight", 0.5),
             "part4_weight": config.get("pmg_stage2_part4_weight", 0.0),
             "concat_weight": config.get("pmg_stage2_concat_weight", 0.5),
-            "cls_weight": config.get("pmg_stage2_cls_weight", 0.0),
         }
 
     return {
-        "stage_name": "Stage 3 | Full PMG + Spatial CLS aggregator",
+        "stage_name": "Stage 3 | Full PMG + HR fine branch",
         "global_weight": config.get("pmg_stage3_global_weight", 1.0),
         "part2_weight": config.get("pmg_stage3_part2_weight", 0.5),
-        "part4_weight": config.get("pmg_stage3_part4_weight", 0.5),
+        "part4_weight": config.get("pmg_stage3_part4_weight", 0.3),
         "concat_weight": config.get("pmg_stage3_concat_weight", 1.0),
-        "cls_weight": config.get("pmg_stage3_cls_weight", 0.3),
     }
 
 
@@ -52,16 +49,10 @@ def _compute_pmg_loss(outputs, labels, criterion, stage_cfg):
         loss = loss + stage_cfg["concat_weight"] * \
             criterion(outputs["concat_logits"], labels)
 
-    if stage_cfg["cls_weight"] > 0:
-        loss = loss + stage_cfg["cls_weight"] * \
-            criterion(outputs["cls_logits"], labels)
-
     return loss
 
 
 def _get_eval_logits(outputs, stage_cfg):
-    if stage_cfg["cls_weight"] > 0:
-        return outputs["cls_logits"]
     if stage_cfg["concat_weight"] > 0:
         return outputs["concat_logits"]
     return outputs["global_logits"]

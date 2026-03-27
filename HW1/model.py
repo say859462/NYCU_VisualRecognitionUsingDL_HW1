@@ -72,87 +72,6 @@ class PMGHead(nn.Module):
         return logits, embed, logits_all
 
 
-class SpatialCLSAggregator(nn.Module):
-    def __init__(
-        self,
-        embed_dim,
-        num_classes,
-        num_subcenters=3,
-        num_heads=4,
-        attn_dropout=0.1,
-        ffn_ratio=2.0,
-        block_dropout=0.1,
-        num_levels=3,
-        tokens_per_level=49,
-    ):
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.tokens_per_level = tokens_per_level
-        self.num_levels = num_levels
-
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(
-            torch.zeros(1, tokens_per_level, embed_dim))
-        self.level_embed = nn.Parameter(torch.zeros(1, num_levels, embed_dim))
-
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.attn = nn.MultiheadAttention(
-            embed_dim=embed_dim,
-            num_heads=num_heads,
-            dropout=attn_dropout,
-            batch_first=True,
-        )
-        self.drop1 = nn.Dropout(block_dropout)
-
-        hidden_dim = int(embed_dim * ffn_ratio)
-        self.norm2 = nn.LayerNorm(embed_dim)
-        self.ffn = nn.Sequential(
-            nn.Linear(embed_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(block_dropout),
-            nn.Linear(hidden_dim, embed_dim),
-            nn.Dropout(block_dropout),
-        )
-
-        self.classifier = SubCenterClassifier(
-            in_features=embed_dim,
-            num_classes=num_classes,
-            num_subcenters=num_subcenters,
-            scale=16.0,
-            learn_scale=True,
-        )
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
-        nn.init.trunc_normal_(self.level_embed, std=0.02)
-
-    def forward(self, tokens_l2, tokens_l3, tokens_l4):
-        # tokens_* shape: [B, 49, D]
-        bsz = tokens_l2.size(0)
-
-        tokens_l2 = tokens_l2 + self.pos_embed + self.level_embed[:, 0:1, :]
-        tokens_l3 = tokens_l3 + self.pos_embed + self.level_embed[:, 1:2, :]
-        tokens_l4 = tokens_l4 + self.pos_embed + self.level_embed[:, 2:3, :]
-
-        spatial_tokens = torch.cat(
-            [tokens_l2, tokens_l3, tokens_l4], dim=1)  # [B, 147, D]
-        cls = self.cls_token.expand(bsz, -1, -1)
-        x = torch.cat([cls, spatial_tokens], dim=1)  # [B, 148, D]
-
-        x_norm = self.norm1(x)
-        attn_out, attn_weights = self.attn(
-            x_norm, x_norm, x_norm, need_weights=True)
-        x = x + self.drop1(attn_out)
-        x = x + self.ffn(self.norm2(x))
-
-        cls_out = x[:, 0]
-        cls_logits, cls_logits_all = self.classifier(cls_out)
-        return cls_logits, cls_out, cls_logits_all, attn_weights
-
-
 class ImageClassificationModel(nn.Module):
     def __init__(
         self,
@@ -160,16 +79,8 @@ class ImageClassificationModel(nn.Module):
         pretrained=True,
         num_subcenters=3,
         embed_dim=256,
-        token_grid_size=7,
-        cls_num_heads=4,
-        cls_attn_dropout=0.1,
-        cls_ffn_ratio=2.0,
-        cls_block_dropout=0.1,
     ):
         super().__init__()
-
-        self.embed_dim = embed_dim
-        self.token_grid_size = token_grid_size
 
         resnet = models.resnet152(
             weights=models.ResNet152_Weights.DEFAULT if pretrained else None
@@ -200,48 +111,28 @@ class ImageClassificationModel(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # Spatial token path
-        self.proj_l2_token = nn.Sequential(
-            nn.Conv2d(512, embed_dim, kernel_size=1, bias=False),
-            nn.BatchNorm2d(embed_dim),
+        # High-resolution fine branch from layer3
+        self.proj_l3_fine = nn.Sequential(
+            nn.Conv2d(1024, 256, kernel_size=1, bias=False),
+            nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
         )
-        self.proj_l3_token = nn.Sequential(
-            nn.Conv2d(1024, embed_dim, kernel_size=1, bias=False),
-            nn.BatchNorm2d(embed_dim),
-            nn.ReLU(inplace=True),
-        )
-        self.proj_l4_token = nn.Sequential(
-            nn.Conv2d(2048, embed_dim, kernel_size=1, bias=False),
-            nn.BatchNorm2d(embed_dim),
-            nn.ReLU(inplace=True),
-        )
-        self.token_pool = nn.AdaptiveAvgPool2d(
-            (token_grid_size, token_grid_size))
 
         self.gem = GeM(p=3.0, learn_p=True)
         self.pool_2 = nn.AdaptiveAvgPool2d((2, 2))
-        self.pool_4 = nn.AdaptiveAvgPool2d((4, 4))
+        self.pool_4_fine = nn.AdaptiveAvgPool2d((4, 4))
 
         self.global_head = PMGHead(
-            512, embed_dim, num_classes, num_subcenters, dropout=0.2)
+            512, embed_dim, num_classes, num_subcenters, dropout=0.2
+        )
         self.part2_head = PMGHead(
-            512 * 4, embed_dim, num_classes, num_subcenters, dropout=0.2)
+            512 * 4, embed_dim, num_classes, num_subcenters, dropout=0.2
+        )
         self.part4_head = PMGHead(
-            512 * 16, embed_dim, num_classes, num_subcenters, dropout=0.2)
+            256 * 16, embed_dim, num_classes, num_subcenters, dropout=0.2
+        )
         self.concat_head = PMGHead(
-            embed_dim * 3, embed_dim, num_classes, num_subcenters, dropout=0.3)
-
-        self.cls_aggregator = SpatialCLSAggregator(
-            embed_dim=embed_dim,
-            num_classes=num_classes,
-            num_subcenters=num_subcenters,
-            num_heads=cls_num_heads,
-            attn_dropout=cls_attn_dropout,
-            ffn_ratio=cls_ffn_ratio,
-            block_dropout=cls_block_dropout,
-            num_levels=3,
-            tokens_per_level=token_grid_size * token_grid_size,
+            embed_dim * 3, embed_dim, num_classes, num_subcenters, dropout=0.3
         )
 
         self._freeze_shallow_layers()
@@ -254,20 +145,15 @@ class ImageClassificationModel(nn.Module):
 
         for module in [
             self.layer2, self.layer3, self.layer4,
-            self.proj_l3, self.proj_l4, self.fuse,
-            self.proj_l2_token, self.proj_l3_token, self.proj_l4_token,
+            self.proj_l3, self.proj_l4, self.fuse, self.proj_l3_fine,
             self.gem,
-            self.global_head, self.part2_head, self.part4_head,
-            self.concat_head, self.cls_aggregator
+            self.global_head, self.part2_head, self.part4_head, self.concat_head
         ]:
             for p in module.parameters():
                 p.requires_grad = True
 
     def _init_new_layers(self):
-        for module in [
-            self.proj_l3, self.proj_l4, self.fuse,
-            self.proj_l2_token, self.proj_l3_token, self.proj_l4_token
-        ]:
+        for module in [self.proj_l3, self.proj_l4, self.fuse, self.proj_l3_fine]:
             for m in module.modules():
                 if isinstance(m, nn.Conv2d):
                     nn.init.kaiming_normal_(
@@ -284,11 +170,9 @@ class ImageClassificationModel(nn.Module):
     def get_parameter_groups(self, lr_base):
         head_params = []
         for module in [
-            self.proj_l3, self.proj_l4, self.fuse,
-            self.proj_l2_token, self.proj_l3_token, self.proj_l4_token,
+            self.proj_l3, self.proj_l4, self.fuse, self.proj_l3_fine,
             self.gem,
-            self.global_head, self.part2_head, self.part4_head,
-            self.concat_head, self.cls_aggregator
+            self.global_head, self.part2_head, self.part4_head, self.concat_head
         ]:
             head_params.extend(
                 [p for p in module.parameters() if p.requires_grad])
@@ -320,12 +204,15 @@ class ImageClassificationModel(nn.Module):
         return feat_l2, feat_l3, feat_l4, fused_map
 
     def forward_pmg(self, x, return_attn=False):
-        feat_l2, feat_l3, feat_l4, fused_map = self.forward_features(x)
+        _, feat_l3, _, fused_map = self.forward_features(x)
 
-        # Original PMG heads
+        # Global + coarse branch from fused_map
         global_feat = self.gem(fused_map)
         part2_feat = self.pool_2(fused_map).flatten(1)
-        part4_feat = self.pool_4(fused_map).flatten(1)
+
+        # High-resolution fine branch from layer3
+        fine_map = self.proj_l3_fine(feat_l3)
+        part4_feat = self.pool_4_fine(fine_map).flatten(1)
 
         global_logits, global_embed, global_logits_all = self.global_head(
             global_feat)
@@ -339,43 +226,25 @@ class ImageClassificationModel(nn.Module):
         concat_logits, concat_embed, concat_logits_all = self.concat_head(
             concat_feat)
 
-        # Spatial token path
-        tokens_l2 = self.token_pool(self.proj_l2_token(
-            feat_l2)).flatten(2).transpose(1, 2)
-        tokens_l3 = self.token_pool(self.proj_l3_token(
-            feat_l3)).flatten(2).transpose(1, 2)
-        tokens_l4 = self.token_pool(self.proj_l4_token(
-            feat_l4)).flatten(2).transpose(1, 2)
-
-        cls_logits, cls_embed, cls_logits_all, attn_weights = self.cls_aggregator(
-            tokens_l2, tokens_l3, tokens_l4
-        )
-
         outputs = {
             "global_logits": global_logits,
             "part2_logits": part2_logits,
             "part4_logits": part4_logits,
             "concat_logits": concat_logits,
-            "cls_logits": cls_logits,
 
             "global_embed": global_embed,
             "part2_embed": part2_embed,
             "part4_embed": part4_embed,
             "concat_embed": concat_embed,
-            "cls_embed": cls_embed,
 
             "global_logits_all": global_logits_all,
             "part2_logits_all": part2_logits_all,
             "part4_logits_all": part4_logits_all,
             "concat_logits_all": concat_logits_all,
-            "cls_logits_all": cls_logits_all,
 
-            "tokens_l2": tokens_l2,
-            "tokens_l3": tokens_l3,
-            "tokens_l4": tokens_l4,
+            "fused_map": fused_map,
+            "fine_map": fine_map,
         }
-        if return_attn:
-            outputs["cls_attn_weights"] = attn_weights
         return outputs
 
     def prototype_diversity_loss(self, margin=0.2):
@@ -387,7 +256,6 @@ class ImageClassificationModel(nn.Module):
             self.part2_head.classifier,
             self.part4_head.classifier,
             self.concat_head.classifier,
-            self.cls_aggregator.classifier,
         ]
 
         for clf in classifiers:
@@ -410,8 +278,10 @@ class ImageClassificationModel(nn.Module):
         return total_loss / count
 
     def get_saliency(self, x):
-        _, _, _, fused_map = self.forward_features(x)
-        saliency = fused_map.pow(2).mean(dim=1, keepdim=True)
+        _, feat_l3, _, fused_map = self.forward_features(x)
+        fine_map = self.proj_l3_fine(feat_l3)
+        saliency = 0.5 * fused_map.pow(2).mean(dim=1, keepdim=True) + \
+            0.5 * fine_map.pow(2).mean(dim=1, keepdim=True)
         saliency = F.interpolate(
             saliency,
             size=x.shape[-2:],

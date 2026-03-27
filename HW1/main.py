@@ -141,11 +141,6 @@ def main():
         pretrained=True,
         num_subcenters=num_subcenters,
         embed_dim=embed_dim,
-        token_grid_size=config.get("token_grid_size", 7),
-        cls_num_heads=config.get("cls_num_heads", 4),
-        cls_attn_dropout=config.get("cls_attn_dropout", 0.1),
-        cls_ffn_ratio=config.get("cls_ffn_ratio", 2.0),
-        cls_block_dropout=config.get("cls_block_dropout", 0.1),
     ).to(device)
 
     if not model.check_parameters():
@@ -228,8 +223,7 @@ def main():
                 f"global: {stage_cfg['global_weight']:.2f}, "
                 f"part2: {stage_cfg['part2_weight']:.2f}, "
                 f"part4: {stage_cfg['part4_weight']:.2f}, "
-                f"concat: {stage_cfg['concat_weight']:.2f}, "
-                f"cls: {stage_cfg['cls_weight']:.2f}"
+                f"concat: {stage_cfg['concat_weight']:.2f}"
             )
 
             print(

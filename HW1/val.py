@@ -4,8 +4,6 @@ from train import _get_stage_weights, _compute_pmg_loss
 
 
 def _get_eval_logits(outputs, stage_cfg):
-    if stage_cfg["cls_weight"] > 0:
-        return outputs["cls_logits"]
     if stage_cfg["concat_weight"] > 0:
         return outputs["concat_logits"]
     return outputs["global_logits"]

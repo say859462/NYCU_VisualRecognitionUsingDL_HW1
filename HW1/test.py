@@ -49,11 +49,6 @@ def main():
         pretrained=False,
         num_subcenters=config.get("num_subcenters", 3),
         embed_dim=config.get("embed_dim", 256),
-        token_grid_size=config.get("token_grid_size", 7),
-        cls_num_heads=config.get("cls_num_heads", 4),
-        cls_attn_dropout=config.get("cls_attn_dropout", 0.1),
-        cls_ffn_ratio=config.get("cls_ffn_ratio", 2.0),
-        cls_block_dropout=config.get("cls_block_dropout", 0.1),
     ).to(device)
 
     model.load_state_dict(torch.load(model_path, map_location=device))
@@ -66,7 +61,7 @@ def main():
         for images, _ in tqdm(test_loader, desc="Testing"):
             images = images.to(device, non_blocking=True)
             outputs = model.forward_pmg(images)
-            preds = torch.argmax(outputs["cls_logits"], dim=1)
+            preds = torch.argmax(outputs["concat_logits"], dim=1)
             all_predictions.extend(preds.cpu().tolist())
 
     image_names = [
