@@ -72,52 +72,74 @@ class PMGHead(nn.Module):
         return logits, embed, logits_all
 
 
-class LearnableLogitFusion(nn.Module):
-    def __init__(self, init_weights=None):
+class CLSAggregator(nn.Module):
+    def __init__(
+        self,
+        embed_dim,
+        num_classes,
+        num_subcenters=3,
+        num_heads=4,
+        attn_dropout=0.1,
+        ffn_ratio=2.0,
+        block_dropout=0.1,
+    ):
         super().__init__()
-        if init_weights is None:
-            init_weights = {
-                "global": 0.15,
-                "part2": 0.25,
-                "part4": 0.10,
-                "concat": 0.50,
-            }
+        self.embed_dim = embed_dim
 
-        self.order = ["global", "part2", "part4", "concat"]
-        init = torch.tensor([init_weights[k]
-                            for k in self.order], dtype=torch.float32)
-        init = init / init.sum()
-        self.raw_weights = nn.Parameter(torch.log(init.clamp(min=1e-6)))
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.type_embed = nn.Parameter(torch.zeros(1, 4, embed_dim))
 
-    def forward(self, logits_dict, enabled_mask=None):
-        if enabled_mask is None:
-            enabled_mask = {k: True for k in self.order}
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            dropout=attn_dropout,
+            batch_first=True,
+        )
+        self.drop1 = nn.Dropout(block_dropout)
 
-        logits_ref = next(iter(logits_dict.values()))
-        device = logits_ref.device
-        raw = self.raw_weights.to(device)
-
-        mask = torch.tensor(
-            [1.0 if enabled_mask.get(k, False) else 0.0 for k in self.order],
-            dtype=raw.dtype,
-            device=device
+        hidden_dim = int(embed_dim * ffn_ratio)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(block_dropout),
+            nn.Linear(hidden_dim, embed_dim),
+            nn.Dropout(block_dropout),
         )
 
-        if mask.sum() <= 0:
-            raise ValueError("At least one branch must be enabled for fusion.")
+        self.classifier = SubCenterClassifier(
+            in_features=embed_dim,
+            num_classes=num_classes,
+            num_subcenters=num_subcenters,
+            scale=16.0,
+            learn_scale=True,
+        )
 
-        masked_raw = raw.masked_fill(mask == 0, float("-inf"))
-        weights = torch.softmax(masked_raw, dim=0)
+        self.reset_parameters()
 
-        fused_logits = 0.0
-        for i, k in enumerate(self.order):
-            if enabled_mask.get(k, False):
-                fused_logits = fused_logits + weights[i] * logits_dict[k]
+    def reset_parameters(self):
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.type_embed, std=0.02)
 
-        return fused_logits, {
-            k: float(weights[i].detach().cpu().item())
-            for i, k in enumerate(self.order)
-        }
+    def forward(self, global_embed, part2_embed, part4_embed):
+        bsz = global_embed.size(0)
+
+        cls = self.cls_token.expand(bsz, -1, -1)
+        tokens = torch.stack([global_embed, part2_embed, part4_embed], dim=1)
+        x = torch.cat([cls, tokens], dim=1)  # [B, 4, D]
+        x = x + self.type_embed
+
+        x_norm = self.norm1(x)
+        attn_out, attn_weights = self.attn(
+            x_norm, x_norm, x_norm, need_weights=True)
+        x = x + self.drop1(attn_out)
+
+        x = x + self.ffn(self.norm2(x))
+
+        cls_out = x[:, 0]
+        cls_logits, cls_logits_all = self.classifier(cls_out)
+        return cls_logits, cls_out, cls_logits_all, attn_weights
 
 
 class ImageClassificationModel(nn.Module):
@@ -127,7 +149,10 @@ class ImageClassificationModel(nn.Module):
         pretrained=True,
         num_subcenters=3,
         embed_dim=256,
-        fusion_init_weights=None,
+        cls_num_heads=4,
+        cls_attn_dropout=0.1,
+        cls_ffn_ratio=2.0,
+        cls_block_dropout=0.1,
     ):
         super().__init__()
 
@@ -172,8 +197,15 @@ class ImageClassificationModel(nn.Module):
         self.concat_head = PMGHead(
             embed_dim * 3, embed_dim, num_classes, num_subcenters, dropout=0.3)
 
-        self.fusion_head = LearnableLogitFusion(
-            init_weights=fusion_init_weights)
+        self.cls_aggregator = CLSAggregator(
+            embed_dim=embed_dim,
+            num_classes=num_classes,
+            num_subcenters=num_subcenters,
+            num_heads=cls_num_heads,
+            attn_dropout=cls_attn_dropout,
+            ffn_ratio=cls_ffn_ratio,
+            block_dropout=cls_block_dropout,
+        )
 
         self._freeze_shallow_layers()
         self._init_new_layers()
@@ -187,7 +219,7 @@ class ImageClassificationModel(nn.Module):
             self.layer2, self.layer3, self.layer4,
             self.proj_l3, self.proj_l4, self.fuse, self.gem,
             self.global_head, self.part2_head, self.part4_head,
-            self.concat_head, self.fusion_head
+            self.concat_head, self.cls_aggregator
         ]:
             for p in module.parameters():
                 p.requires_grad = True
@@ -211,7 +243,7 @@ class ImageClassificationModel(nn.Module):
         for module in [
             self.proj_l3, self.proj_l4, self.fuse, self.gem,
             self.global_head, self.part2_head, self.part4_head,
-            self.concat_head, self.fusion_head
+            self.concat_head, self.cls_aggregator
         ]:
             head_params.extend(
                 [p for p in module.parameters() if p.requires_grad])
@@ -225,33 +257,6 @@ class ImageClassificationModel(nn.Module):
             ) if p.requires_grad], "lr": lr_base * 1.0},
             {"params": head_params, "lr": lr_base * 1.5},
         ]
-
-    def get_fusion_only_parameter_groups(self, lr):
-        return [
-            {"params": [p for p in self.fusion_head.parameters()
-                        if p.requires_grad], "lr": lr}
-        ]
-
-    def freeze_for_fusion_refinement(self):
-        for p in self.parameters():
-            p.requires_grad = False
-
-        for p in self.fusion_head.parameters():
-            p.requires_grad = True
-
-        self.stem.eval()
-        self.layer1.eval()
-        self.layer2.eval()
-        self.layer3.eval()
-        self.layer4.eval()
-        self.proj_l3.eval()
-        self.proj_l4.eval()
-        self.fuse.eval()
-        self.global_head.eval()
-        self.part2_head.eval()
-        self.part4_head.eval()
-        self.concat_head.eval()
-        self.fusion_head.train()
 
     def forward_features(self, x):
         x = self.stem(x)
@@ -268,17 +273,7 @@ class ImageClassificationModel(nn.Module):
         fused_map = self.fuse(torch.cat([feat_l3, feat_l4], dim=1))
         return fused_map
 
-    def get_enabled_branches(self, stage_cfg=None):
-        if stage_cfg is None:
-            return {"global": True, "part2": True, "part4": True, "concat": True}
-        return {
-            "global": stage_cfg.get("global_weight", 0.0) > 0,
-            "part2": stage_cfg.get("part2_weight", 0.0) > 0,
-            "part4": stage_cfg.get("part4_weight", 0.0) > 0,
-            "concat": stage_cfg.get("concat_weight", 0.0) > 0,
-        }
-
-    def forward_pmg(self, x, stage_cfg=None):
+    def forward_pmg(self, x, return_attn=False):
         fused_map = self.forward_features(x)
 
         global_feat = self.gem(fused_map)
@@ -297,52 +292,51 @@ class ImageClassificationModel(nn.Module):
         concat_logits, concat_embed, concat_logits_all = self.concat_head(
             concat_feat)
 
-        logits_dict = {
-            "global": global_logits,
-            "part2": part2_logits,
-            "part4": part4_logits,
-            "concat": concat_logits,
-        }
+        cls_logits, cls_embed, cls_logits_all, attn_weights = self.cls_aggregator(
+            global_embed, part2_embed, part4_embed
+        )
 
-        enabled_branches = self.get_enabled_branches(stage_cfg)
-        fusion_logits, fusion_weights = self.fusion_head(
-            logits_dict, enabled_branches)
-
-        return {
+        outputs = {
             "global_logits": global_logits,
             "part2_logits": part2_logits,
             "part4_logits": part4_logits,
             "concat_logits": concat_logits,
-            "fusion_logits": fusion_logits,
-            "fusion_weights": fusion_weights,
+            "cls_logits": cls_logits,
 
             "global_embed": global_embed,
             "part2_embed": part2_embed,
             "part4_embed": part4_embed,
             "concat_embed": concat_embed,
+            "cls_embed": cls_embed,
 
             "global_logits_all": global_logits_all,
             "part2_logits_all": part2_logits_all,
             "part4_logits_all": part4_logits_all,
             "concat_logits_all": concat_logits_all,
+            "cls_logits_all": cls_logits_all,
         }
+        if return_attn:
+            outputs["cls_attn_weights"] = attn_weights
+        return outputs
 
     def prototype_diversity_loss(self, margin=0.2):
         total_loss = 0.0
         count = 0
 
-        heads = [
+        classifiers = [
             self.global_head.classifier,
             self.part2_head.classifier,
             self.part4_head.classifier,
             self.concat_head.classifier,
+            self.cls_aggregator.classifier,
         ]
 
-        for clf in heads:
-            w = F.normalize(clf.weight, dim=2)
-            c, k, d = w.shape
-            if k <= 1:
+        for clf in classifiers:
+            if clf.num_subcenters <= 1:
                 continue
+
+            w = F.normalize(clf.weight, dim=2)
+            _, k, _ = w.shape
 
             sim = torch.einsum("ckd,cjd->ckj", w, w)
             eye = torch.eye(k, device=sim.device).unsqueeze(0)

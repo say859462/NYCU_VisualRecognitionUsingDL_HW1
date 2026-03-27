@@ -20,11 +20,11 @@ def compute_accuracy(preds, labels):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PMG / Fusion analysis")
+    parser = argparse.ArgumentParser(description="PMG / CLS analysis")
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--save_dir", type=str,
-                        default="./Plot/Analysis_PMG_74v3")
+                        default="./Plot/Analysis_PMG_CLS")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
@@ -60,19 +60,14 @@ def main():
         pretrained=False,
         num_subcenters=config.get("num_subcenters", 3),
         embed_dim=config.get("embed_dim", 256),
-        fusion_init_weights=config.get("fusion_init_weights", None),
+        cls_num_heads=config.get("cls_num_heads", 4),
+        cls_attn_dropout=config.get("cls_attn_dropout", 0.1),
+        cls_ffn_ratio=config.get("cls_ffn_ratio", 2.0),
+        cls_block_dropout=config.get("cls_block_dropout", 0.1),
     ).to(device)
 
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
-
-    stage_cfg = {
-        "global_weight": 1.0,
-        "part2_weight": 1.0,
-        "part4_weight": 1.0,
-        "concat_weight": 1.0,
-        "fusion_weight": 1.0,
-    }
 
     rows = []
     all_labels = []
@@ -81,51 +76,46 @@ def main():
     part2_preds = []
     part4_preds = []
     concat_preds = []
-    fusion_preds = []
+    cls_preds = []
 
-    concat_wrong_fusion_right = 0
-    concat_right_fusion_wrong = 0
-    fusion_error_conf = []
-    fusion_error_top2_gap = []
-
-    fusion_weights_snapshot = None
+    concat_wrong_cls_right = 0
+    concat_right_cls_wrong = 0
+    cls_error_conf = []
+    cls_error_top2_gap = []
 
     with torch.no_grad():
         for images, labels in tqdm(val_loader, desc="Analyzing"):
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
 
-            outputs = model.forward_pmg(images, stage_cfg=stage_cfg)
+            outputs = model.forward_pmg(images, return_attn=False)
 
             global_logits = outputs["global_logits"]
             part2_logits = outputs["part2_logits"]
             part4_logits = outputs["part4_logits"]
             concat_logits = outputs["concat_logits"]
-            fusion_logits = outputs["fusion_logits"]
-
-            if fusion_weights_snapshot is None:
-                fusion_weights_snapshot = outputs["fusion_weights"]
+            cls_logits = outputs["cls_logits"]
 
             global_prob = torch.softmax(global_logits, dim=1)
             part2_prob = torch.softmax(part2_logits, dim=1)
             part4_prob = torch.softmax(part4_logits, dim=1)
             concat_prob = torch.softmax(concat_logits, dim=1)
-            fusion_prob = torch.softmax(fusion_logits, dim=1)
+            cls_prob = torch.softmax(cls_logits, dim=1)
 
             global_pred = torch.argmax(global_prob, dim=1)
             part2_pred = torch.argmax(part2_prob, dim=1)
             part4_pred = torch.argmax(part4_prob, dim=1)
             concat_pred = torch.argmax(concat_prob, dim=1)
-            fusion_pred = torch.argmax(fusion_prob, dim=1)
+            cls_pred = torch.argmax(cls_prob, dim=1)
 
             global_preds.extend(global_pred.cpu().tolist())
             part2_preds.extend(part2_pred.cpu().tolist())
             part4_preds.extend(part4_pred.cpu().tolist())
             concat_preds.extend(concat_pred.cpu().tolist())
-            fusion_preds.extend(fusion_pred.cpu().tolist())
+            cls_preds.extend(cls_pred.cpu().tolist())
             all_labels.extend(labels.cpu().tolist())
 
-            top2_prob, _ = torch.topk(fusion_prob, k=2, dim=1)
+            top2_prob, _ = torch.topk(cls_prob, k=2, dim=1)
 
             for i in range(labels.size(0)):
                 y = labels[i].item()
@@ -133,16 +123,16 @@ def main():
                 p2 = part2_pred[i].item()
                 p4 = part4_pred[i].item()
                 cp = concat_pred[i].item()
-                fp = fusion_pred[i].item()
+                clp = cls_pred[i].item()
 
-                if cp != y and fp == y:
-                    concat_wrong_fusion_right += 1
-                if cp == y and fp != y:
-                    concat_right_fusion_wrong += 1
+                if cp != y and clp == y:
+                    concat_wrong_cls_right += 1
+                if cp == y and clp != y:
+                    concat_right_cls_wrong += 1
 
-                if fp != y:
-                    fusion_error_conf.append(float(fusion_prob[i, fp].item()))
-                    fusion_error_top2_gap.append(
+                if clp != y:
+                    cls_error_conf.append(float(cls_prob[i, clp].item()))
+                    cls_error_top2_gap.append(
                         float((top2_prob[i, 0] - top2_prob[i, 1]).item()))
 
                 rows.append({
@@ -151,12 +141,12 @@ def main():
                     "part2_pred": p2,
                     "part4_pred": p4,
                     "concat_pred": cp,
-                    "fusion_pred": fp,
+                    "cls_pred": clp,
                     "global_conf": float(global_prob[i, gp].item()),
                     "part2_conf": float(part2_prob[i, p2].item()),
                     "part4_conf": float(part4_prob[i, p4].item()),
                     "concat_conf": float(concat_prob[i, cp].item()),
-                    "fusion_conf": float(fusion_prob[i, fp].item()),
+                    "cls_conf": float(cls_prob[i, clp].item()),
                 })
 
     pmg_df = pd.DataFrame(rows)
@@ -169,15 +159,14 @@ def main():
         "part2_acc": compute_accuracy(part2_preds, all_labels),
         "part4_acc": compute_accuracy(part4_preds, all_labels),
         "concat_acc": compute_accuracy(concat_preds, all_labels),
-        "fusion_acc": compute_accuracy(fusion_preds, all_labels),
-        "case_concat_wrong_fusion_right": concat_wrong_fusion_right,
-        "case_concat_right_fusion_wrong": concat_right_fusion_wrong,
-        "mean_fusion_error_conf": float(sum(fusion_error_conf) / len(fusion_error_conf)) if fusion_error_conf else 0.0,
-        "median_fusion_error_conf": float(pd.Series(fusion_error_conf).median()) if fusion_error_conf else 0.0,
-        "mean_fusion_error_top2_gap": float(sum(fusion_error_top2_gap) / len(fusion_error_top2_gap)) if fusion_error_top2_gap else 0.0,
-        "high_conf_wrong_count_ge_0.9": int(sum(v >= 0.9 for v in fusion_error_conf)),
-        "high_conf_wrong_count_ge_0.8": int(sum(v >= 0.8 for v in fusion_error_conf)),
-        "fusion_weights": fusion_weights_snapshot,
+        "cls_acc": compute_accuracy(cls_preds, all_labels),
+        "case_concat_wrong_cls_right": concat_wrong_cls_right,
+        "case_concat_right_cls_wrong": concat_right_cls_wrong,
+        "mean_cls_error_conf": float(sum(cls_error_conf) / len(cls_error_conf)) if cls_error_conf else 0.0,
+        "median_cls_error_conf": float(pd.Series(cls_error_conf).median()) if cls_error_conf else 0.0,
+        "mean_cls_error_top2_gap": float(sum(cls_error_top2_gap) / len(cls_error_top2_gap)) if cls_error_top2_gap else 0.0,
+        "high_conf_wrong_count_ge_0.9": int(sum(v >= 0.9 for v in cls_error_conf)),
+        "high_conf_wrong_count_ge_0.8": int(sum(v >= 0.8 for v in cls_error_conf)),
     }
 
     summary_path = os.path.join(args.save_dir, "analysis_summary.json")

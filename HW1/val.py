@@ -4,8 +4,8 @@ from train import _get_stage_weights, _compute_pmg_loss
 
 
 def _get_eval_logits(outputs, stage_cfg):
-    if stage_cfg["fusion_weight"] > 0:
-        return outputs["fusion_logits"]
+    if stage_cfg["cls_weight"] > 0:
+        return outputs["cls_logits"]
     if stage_cfg["concat_weight"] > 0:
         return outputs["concat_logits"]
     return outputs["global_logits"]
@@ -27,7 +27,6 @@ def validate_one_epoch(model, val_loader, criterion, device, config, epoch):
 
     all_preds = []
     all_labels = []
-    fusion_weights_snapshot = None
 
     with torch.no_grad():
         pbar = tqdm(val_loader, desc="Validation", leave=False)
@@ -35,7 +34,7 @@ def validate_one_epoch(model, val_loader, criterion, device, config, epoch):
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
 
-            outputs = model.forward_pmg(images, stage_cfg=stage_cfg)
+            outputs = model.forward_pmg(images)
             loss = _compute_pmg_loss(outputs, labels, criterion, stage_cfg)
 
             logits_for_eval = _get_eval_logits(outputs, stage_cfg)
@@ -48,62 +47,10 @@ def validate_one_epoch(model, val_loader, criterion, device, config, epoch):
             all_preds.extend(preds.cpu().tolist())
             all_labels.extend(labels.cpu().tolist())
 
-            if fusion_weights_snapshot is None:
-                fusion_weights_snapshot = outputs["fusion_weights"]
-
     return (
         running_loss / total,
         (correct / total) * 100,
         all_preds,
         all_labels,
-        fusion_weights_snapshot,
-    )
-
-
-def validate_fusion_refine_one_epoch(model, val_loader, criterion, device):
-    model.eval()
-
-    stage_cfg = {
-        "stage_name": "Fusion refine",
-        "global_weight": 1.0,
-        "part2_weight": 1.0,
-        "part4_weight": 1.0,
-        "concat_weight": 1.0,
-        "fusion_weight": 1.0,
-    }
-
-    running_loss = 0.0
-    correct = 0
-    total = 0
-    all_preds = []
-    all_labels = []
-    fusion_weights_snapshot = None
-
-    with torch.no_grad():
-        pbar = tqdm(val_loader, desc="Fusion Refine Val", leave=False)
-        for images, labels in pbar:
-            images = images.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
-
-            outputs = model.forward_pmg(images, stage_cfg=stage_cfg)
-            loss = criterion(outputs["fusion_logits"], labels)
-
-            preds = torch.argmax(outputs["fusion_logits"], dim=1)
-
-            running_loss += loss.item() * images.size(0)
-            correct += torch.sum(preds == labels).item()
-            total += labels.size(0)
-
-            all_preds.extend(preds.cpu().tolist())
-            all_labels.extend(labels.cpu().tolist())
-
-            if fusion_weights_snapshot is None:
-                fusion_weights_snapshot = outputs["fusion_weights"]
-
-    return (
-        running_loss / total,
-        (correct / total) * 100,
-        all_preds,
-        all_labels,
-        fusion_weights_snapshot,
+        None,
     )

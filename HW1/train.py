@@ -10,7 +10,7 @@ def _get_stage_weights(epoch, stage1_epochs, stage2_epochs, config):
             "part2_weight": 0.0,
             "part4_weight": 0.0,
             "concat_weight": 0.0,
-            "fusion_weight": 0.0,
+            "cls_weight": 0.0,
         }
 
     if epoch <= stage1_epochs + stage2_epochs:
@@ -20,16 +20,16 @@ def _get_stage_weights(epoch, stage1_epochs, stage2_epochs, config):
             "part2_weight": config.get("pmg_stage2_part2_weight", 0.5),
             "part4_weight": config.get("pmg_stage2_part4_weight", 0.0),
             "concat_weight": config.get("pmg_stage2_concat_weight", 0.5),
-            "fusion_weight": config.get("pmg_stage2_fusion_weight", 0.0),
+            "cls_weight": config.get("pmg_stage2_cls_weight", 0.0),
         }
 
     return {
-        "stage_name": "Stage 3 | Full PMG",
+        "stage_name": "Stage 3 | Full PMG + CLS aggregator",
         "global_weight": config.get("pmg_stage3_global_weight", 1.0),
         "part2_weight": config.get("pmg_stage3_part2_weight", 0.5),
         "part4_weight": config.get("pmg_stage3_part4_weight", 0.5),
         "concat_weight": config.get("pmg_stage3_concat_weight", 1.0),
-        "fusion_weight": config.get("pmg_stage3_fusion_weight", 0.0),
+        "cls_weight": config.get("pmg_stage3_cls_weight", 1.0),
     }
 
 
@@ -37,26 +37,31 @@ def _compute_pmg_loss(outputs, labels, criterion, stage_cfg):
     loss = 0.0
 
     if stage_cfg["global_weight"] > 0:
-        loss = loss + stage_cfg["global_weight"] * criterion(outputs["global_logits"], labels)
+        loss = loss + stage_cfg["global_weight"] * \
+            criterion(outputs["global_logits"], labels)
 
     if stage_cfg["part2_weight"] > 0:
-        loss = loss + stage_cfg["part2_weight"] * criterion(outputs["part2_logits"], labels)
+        loss = loss + stage_cfg["part2_weight"] * \
+            criterion(outputs["part2_logits"], labels)
 
     if stage_cfg["part4_weight"] > 0:
-        loss = loss + stage_cfg["part4_weight"] * criterion(outputs["part4_logits"], labels)
+        loss = loss + stage_cfg["part4_weight"] * \
+            criterion(outputs["part4_logits"], labels)
 
     if stage_cfg["concat_weight"] > 0:
-        loss = loss + stage_cfg["concat_weight"] * criterion(outputs["concat_logits"], labels)
+        loss = loss + stage_cfg["concat_weight"] * \
+            criterion(outputs["concat_logits"], labels)
 
-    if stage_cfg["fusion_weight"] > 0:
-        loss = loss + stage_cfg["fusion_weight"] * criterion(outputs["fusion_logits"], labels)
+    if stage_cfg["cls_weight"] > 0:
+        loss = loss + stage_cfg["cls_weight"] * \
+            criterion(outputs["cls_logits"], labels)
 
     return loss
 
 
 def _get_eval_logits(outputs, stage_cfg):
-    if stage_cfg["fusion_weight"] > 0:
-        return outputs["fusion_logits"]
+    if stage_cfg["cls_weight"] > 0:
+        return outputs["cls_logits"]
     if stage_cfg["concat_weight"] > 0:
         return outputs["concat_logits"]
     return outputs["global_logits"]
@@ -98,7 +103,7 @@ def train_one_epoch(
         use_amp = (device.type == "cuda")
 
         with torch.amp.autocast("cuda", enabled=use_amp):
-            outputs = model.forward_pmg(images, stage_cfg=stage_cfg)
+            outputs = model.forward_pmg(images)
             loss = _compute_pmg_loss(outputs, labels, criterion, stage_cfg)
 
             if proto_diversity_weight > 0:
@@ -123,61 +128,3 @@ def train_one_epoch(
         })
 
     return running_loss / total, (correct / total) * 100, stage_cfg
-
-
-def train_fusion_refine_one_epoch(
-    model,
-    train_loader,
-    criterion,
-    optimizer,
-    device,
-    scaler,
-    max_grad_norm=5.0,
-):
-    model.train()
-    model.freeze_for_fusion_refinement()
-
-    running_loss = 0.0
-    correct = 0
-    total = 0
-
-    stage_cfg = {
-        "stage_name": "Fusion refine",
-        "global_weight": 1.0,
-        "part2_weight": 1.0,
-        "part4_weight": 1.0,
-        "concat_weight": 1.0,
-        "fusion_weight": 1.0,
-    }
-
-    pbar = tqdm(train_loader, desc="Fusion Refine", leave=False)
-
-    for images, labels in pbar:
-        images = images.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-
-        optimizer.zero_grad(set_to_none=True)
-        use_amp = (device.type == "cuda")
-
-        with torch.amp.autocast("cuda", enabled=use_amp):
-            outputs = model.forward_pmg(images, stage_cfg=stage_cfg)
-            loss = criterion(outputs["fusion_logits"], labels)
-
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.fusion_head.parameters(), max_grad_norm)
-        scaler.step(optimizer)
-        scaler.update()
-
-        preds = torch.argmax(outputs["fusion_logits"], dim=1)
-
-        running_loss += loss.item() * images.size(0)
-        correct += torch.sum(preds == labels).item()
-        total += labels.size(0)
-
-        pbar.set_postfix({
-            "loss": f"{loss.item():.4f}",
-            "acc": f"{(correct / total) * 100:.2f}%"
-        })
-
-    return running_loss / total, (correct / total) * 100

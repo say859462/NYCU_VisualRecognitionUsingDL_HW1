@@ -3,8 +3,8 @@ from utils import (
     plot_per_class_error,
     plot_long_tail_accuracy,
 )
-from val import validate_one_epoch, validate_fusion_refine_one_epoch
-from train import train_one_epoch, train_fusion_refine_one_epoch
+from val import validate_one_epoch
+from train import train_one_epoch
 from model import ImageClassificationModel
 from dataset import ImageDataset
 
@@ -71,15 +71,11 @@ def main():
     resume_training = config.get("resume_training", False)
 
     checkpoint_path = config["checkpoint_path"]
-    best_pmg_model_path = config["best_pmg_model_path"]
     best_model_path = config["best_model_path"]
     best_loss_model_path = config["best_loss_model_path"]
 
     num_subcenters = config.get("num_subcenters", 3)
     embed_dim = config.get("embed_dim", 256)
-
-    skip_pmg_training = config.get("skip_pmg_training", False)
-    enable_fusion_refine = config.get("enable_fusion_refine", False)
 
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -145,7 +141,10 @@ def main():
         pretrained=True,
         num_subcenters=num_subcenters,
         embed_dim=embed_dim,
-        fusion_init_weights=config.get("fusion_init_weights", None),
+        cls_num_heads=config.get("cls_num_heads", 4),
+        cls_attn_dropout=config.get("cls_attn_dropout", 0.1),
+        cls_ffn_ratio=config.get("cls_ffn_ratio", 2.0),
+        cls_block_dropout=config.get("cls_block_dropout", 0.1),
     ).to(device)
 
     if not model.check_parameters():
@@ -171,7 +170,7 @@ def main():
     best_val_preds = []
     best_val_labels = []
 
-    if resume_training and os.path.exists(checkpoint_path) and not skip_pmg_training:
+    if resume_training and os.path.exists(checkpoint_path):
         checkpoint = torch.load(
             checkpoint_path, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
@@ -190,181 +189,97 @@ def main():
 
     training_start_time = time.time()
 
-    # =========================
-    # Phase A: Pure PMG training
-    # =========================
-    if not skip_pmg_training:
-        try:
-            for epoch in range(start_epoch, num_epochs):
-                current_epoch = epoch + 1
-                print(f"\n--- Epoch {current_epoch}/{num_epochs} ---")
+    try:
+        for epoch in range(start_epoch, num_epochs):
+            current_epoch = epoch + 1
+            print(f"\n--- Epoch {current_epoch}/{num_epochs} ---")
 
-                train_loss, train_acc, stage_cfg = train_one_epoch(
-                    model=model,
-                    train_loader=train_loader,
-                    criterion=criterion_train,
-                    epoch=current_epoch,
-                    optimizer=optimizer,
-                    device=device,
-                    scaler=scaler,
-                    config=config,
-                )
-
-                val_loss, val_acc, val_preds, val_labels, fusion_weights = validate_one_epoch(
-                    model=model,
-                    val_loader=val_loader,
-                    criterion=criterion_val,
-                    device=device,
-                    config=config,
-                    epoch=current_epoch,
-                )
-
-                scheduler.step()
-
-                history["train_loss"].append(train_loss)
-                history["train_acc"].append(train_acc)
-                history["val_loss"].append(val_loss)
-                history["val_acc"].append(val_acc)
-
-                print(stage_cfg["stage_name"])
-                print(
-                    "Loss weights -> "
-                    f"global: {stage_cfg['global_weight']:.2f}, "
-                    f"part2: {stage_cfg['part2_weight']:.2f}, "
-                    f"part4: {stage_cfg['part4_weight']:.2f}, "
-                    f"concat: {stage_cfg['concat_weight']:.2f}, "
-                    f"fusion: {stage_cfg['fusion_weight']:.2f}"
-                )
-
-                if stage_cfg["fusion_weight"] > 0 and fusion_weights is not None:
-                    print(
-                        "Fusion weights -> "
-                        f"global: {fusion_weights['global']:.3f}, "
-                        f"part2: {fusion_weights['part2']:.3f}, "
-                        f"part4: {fusion_weights['part4']:.3f}, "
-                        f"concat: {fusion_weights['concat']:.3f}"
-                    )
-
-                print(
-                    f"LR: {optimizer.param_groups[-1]['lr']:.6f} | "
-                    f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
-                    f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%"
-                )
-
-                improved = False
-
-                if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss_for_acc):
-                    best_val_acc = val_acc
-                    best_val_loss_for_acc = val_loss
-                    best_val_preds = val_preds
-                    best_val_labels = val_labels
-                    improved = True
-                    torch.save(model.state_dict(), best_pmg_model_path)
-                    print(f"🌟 Best PMG model saved ({best_val_acc:.2f}%)")
-
-                if val_loss < best_val_loss_only:
-                    best_val_loss_only = val_loss
-                    improved = True
-                    torch.save(model.state_dict(), best_loss_model_path)
-                    print(
-                        f"💡 Best loss model saved ({best_val_loss_only:.4f})")
-
-                if improved:
-                    epochs_no_improve = 0
-                else:
-                    epochs_no_improve += 1
-                    print(
-                        f"No improvement! {epochs_no_improve}/{early_stopping_patience}")
-
-                torch.save({
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "scheduler_state_dict": scheduler.state_dict(),
-                    "best_val_acc": best_val_acc,
-                    "best_val_loss_for_acc": best_val_loss_for_acc,
-                    "best_val_loss_only": best_val_loss_only,
-                    "history": history,
-                    "epochs_no_improve": epochs_no_improve,
-                    "best_val_preds": best_val_preds,
-                    "best_val_labels": best_val_labels,
-                }, checkpoint_path)
-
-                if epochs_no_improve >= early_stopping_patience:
-                    break
-
-        except KeyboardInterrupt:
-            print("\n" + "=" * 50 +
-                  "\nDetected Keyboard Interrupt during Phase A.\n" + "=" * 50)
-    else:
-        print("\n" + "=" * 60)
-        print("Skip Phase A: Pure PMG training")
-        print("=" * 60)
-
-    # =========================
-    # Phase B: Fusion refinement
-    # =========================
-    if enable_fusion_refine:
-        print("\n" + "=" * 60)
-        print("Start Phase B: Fusion Refinement")
-        print("=" * 60)
-
-        refine_ckpt = config.get(
-            "fusion_refine_checkpoint_path", best_pmg_model_path)
-        if not os.path.exists(refine_ckpt):
-            raise FileNotFoundError(
-                f"Fusion refinement checkpoint not found: {refine_ckpt}")
-
-        model.load_state_dict(torch.load(refine_ckpt, map_location=device))
-        model.freeze_for_fusion_refinement()
-
-        fusion_optimizer = optim.AdamW(
-            model.get_fusion_only_parameter_groups(
-                config.get("fusion_refine_lr", 2e-5)),
-            weight_decay=1e-4
-        )
-        fusion_scaler = torch.amp.GradScaler(
-            "cuda", enabled=device.type == "cuda")
-
-        best_fusion_acc = 0.0
-        best_fusion_loss = float("inf")
-
-        for refine_epoch in range(config.get("fusion_refine_epochs", 5)):
-            train_loss, train_acc = train_fusion_refine_one_epoch(
+            train_loss, train_acc, stage_cfg = train_one_epoch(
                 model=model,
                 train_loader=train_loader,
                 criterion=criterion_train,
-                optimizer=fusion_optimizer,
+                epoch=current_epoch,
+                optimizer=optimizer,
                 device=device,
-                scaler=fusion_scaler,
+                scaler=scaler,
+                config=config,
             )
 
-            val_loss, val_acc, val_preds, val_labels, fusion_weights = validate_fusion_refine_one_epoch(
+            val_loss, val_acc, val_preds, val_labels, _ = validate_one_epoch(
                 model=model,
                 val_loader=val_loader,
                 criterion=criterion_val,
                 device=device,
+                config=config,
+                epoch=current_epoch,
+            )
+
+            scheduler.step()
+
+            history["train_loss"].append(train_loss)
+            history["train_acc"].append(train_acc)
+            history["val_loss"].append(val_loss)
+            history["val_acc"].append(val_acc)
+
+            print(stage_cfg["stage_name"])
+            print(
+                "Loss weights -> "
+                f"global: {stage_cfg['global_weight']:.2f}, "
+                f"part2: {stage_cfg['part2_weight']:.2f}, "
+                f"part4: {stage_cfg['part4_weight']:.2f}, "
+                f"concat: {stage_cfg['concat_weight']:.2f}, "
+                f"cls: {stage_cfg['cls_weight']:.2f}"
             )
 
             print(
-                f"[Fusion Refine {refine_epoch + 1}/{config.get('fusion_refine_epochs', 5)}] "
+                f"LR: {optimizer.param_groups[-1]['lr']:.6f} | "
                 f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
                 f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%"
             )
-            print(
-                "Fusion weights -> "
-                f"global: {fusion_weights['global']:.3f}, "
-                f"part2: {fusion_weights['part2']:.3f}, "
-                f"part4: {fusion_weights['part4']:.3f}, "
-                f"concat: {fusion_weights['concat']:.3f}"
-            )
 
-            if val_acc > best_fusion_acc or (val_acc == best_fusion_acc and val_loss < best_fusion_loss):
-                best_fusion_acc = val_acc
-                best_fusion_loss = val_loss
+            improved = False
+
+            if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss_for_acc):
+                best_val_acc = val_acc
+                best_val_loss_for_acc = val_loss
+                best_val_preds = val_preds
+                best_val_labels = val_labels
+                improved = True
                 torch.save(model.state_dict(), best_model_path)
+                print(f"🌟 Best model saved ({best_val_acc:.2f}%)")
+
+            if val_loss < best_val_loss_only:
+                best_val_loss_only = val_loss
+                improved = True
+                torch.save(model.state_dict(), best_loss_model_path)
+                print(f"💡 Best loss model saved ({best_val_loss_only:.4f})")
+
+            if improved:
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
                 print(
-                    f"🌟 Best fusion-refined model saved ({best_fusion_acc:.2f}%)")
+                    f"No improvement! {epochs_no_improve}/{early_stopping_patience}")
+
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "best_val_acc": best_val_acc,
+                "best_val_loss_for_acc": best_val_loss_for_acc,
+                "best_val_loss_only": best_val_loss_only,
+                "history": history,
+                "epochs_no_improve": epochs_no_improve,
+                "best_val_preds": best_val_preds,
+                "best_val_labels": best_val_labels,
+            }, checkpoint_path)
+
+            if epochs_no_improve >= early_stopping_patience:
+                break
+
+    except KeyboardInterrupt:
+        print("\n" + "=" * 50 + "\nDetected Keyboard Interrupt.\n" + "=" * 50)
 
     hours, rem = divmod(time.time() - training_start_time, 3600)
     minutes, seconds = divmod(rem, 60)
@@ -396,8 +311,7 @@ def main():
             )
 
     print(
-        f"\n✅ Training Completed | "
-        f"Phase A Best PMG Acc: {best_val_acc:.2f}% | "
+        f"\n✅ Training Completed. Best Val Acc: {best_val_acc:.2f}% | "
         f"Total Time: {int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}"
     )
 

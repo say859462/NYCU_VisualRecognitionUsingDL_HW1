@@ -49,7 +49,10 @@ def main():
         pretrained=False,
         num_subcenters=config.get("num_subcenters", 3),
         embed_dim=config.get("embed_dim", 256),
-        fusion_init_weights=config.get("fusion_init_weights", None),
+        cls_num_heads=config.get("cls_num_heads", 4),
+        cls_attn_dropout=config.get("cls_attn_dropout", 0.1),
+        cls_ffn_ratio=config.get("cls_ffn_ratio", 2.0),
+        cls_block_dropout=config.get("cls_block_dropout", 0.1),
     ).to(device)
 
     model.load_state_dict(torch.load(model_path, map_location=device))
@@ -58,19 +61,11 @@ def main():
     all_predictions = []
     print(f"🚀 Running Final Inference from: {model_path}")
 
-    stage_cfg = {
-        "global_weight": 1.0,
-        "part2_weight": 1.0,
-        "part4_weight": 1.0,
-        "concat_weight": 1.0,
-        "fusion_weight": 1.0,
-    }
-
     with torch.no_grad():
         for images, _ in tqdm(test_loader, desc="Testing"):
             images = images.to(device, non_blocking=True)
-            outputs = model.forward_pmg(images, stage_cfg=stage_cfg)
-            preds = torch.argmax(outputs["fusion_logits"], dim=1)
+            outputs = model.forward_pmg(images)
+            preds = torch.argmax(outputs["cls_logits"], dim=1)
             all_predictions.extend(preds.cpu().tolist())
 
     image_names = [
