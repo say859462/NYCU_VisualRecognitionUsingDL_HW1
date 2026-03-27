@@ -133,8 +133,8 @@ class ImageClassificationModel(nn.Module):
         self.pool_2 = nn.AdaptiveAvgPool2d((2, 2))
 
         # part4 pooling: Avg + Max fusion
-        self.pool_4_fine_avg = nn.AdaptiveAvgPool2d((5, 5))
-        self.pool_4_fine_max = nn.AdaptiveMaxPool2d((5, 5))
+        self.pool_4_fine_avg = nn.AdaptiveAvgPool2d((4, 4))
+        self.pool_4_fine_max = nn.AdaptiveMaxPool2d((4, 4))
 
         self.global_head = PMGHead(
             512, embed_dim, num_classes, num_subcenters, dropout=0.2
@@ -143,7 +143,7 @@ class ImageClassificationModel(nn.Module):
             512 * 4, embed_dim, num_classes, num_subcenters, dropout=0.2
         )
         self.part4_head = PMGHead(
-            256 * 25, embed_dim, num_classes, num_subcenters, dropout=0.2
+            256 * 16, embed_dim, num_classes, num_subcenters, dropout=0.2
         )
         self.concat_head = PMGHead(
             embed_dim * 3, embed_dim, num_classes, num_subcenters, dropout=0.3
