@@ -21,14 +21,22 @@ class GeM(nn.Module):
 
 
 class SubCenterClassifier(nn.Module):
-    def __init__(self, in_features, num_classes, num_subcenters=3, scale=16.0, learn_scale=True):
+    def __init__(
+        self,
+        in_features,
+        num_classes,
+        num_subcenters=3,
+        scale=16.0,
+        learn_scale=True,
+    ):
         super().__init__()
         self.in_features = in_features
         self.num_classes = num_classes
         self.num_subcenters = num_subcenters
 
-        self.weight = nn.Parameter(torch.randn(
-            num_classes, num_subcenters, in_features))
+        self.weight = nn.Parameter(
+            torch.randn(num_classes, num_subcenters, in_features)
+        )
 
         if learn_scale:
             self.scale = nn.Parameter(torch.tensor(float(scale)))
@@ -87,14 +95,17 @@ class ImageClassificationModel(nn.Module):
         )
 
         self.stem = nn.Sequential(
-            resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool
+            resnet.conv1,
+            resnet.bn1,
+            resnet.relu,
+            resnet.maxpool,
         )
         self.layer1 = resnet.layer1
         self.layer2 = resnet.layer2
         self.layer3 = resnet.layer3
         self.layer4 = resnet.layer4
 
-        # Original PMG path
+        # PMG fused path
         self.proj_l3 = nn.Sequential(
             nn.Conv2d(1024, 256, kernel_size=1, bias=False),
             nn.BatchNorm2d(256),
@@ -120,7 +131,10 @@ class ImageClassificationModel(nn.Module):
 
         self.gem = GeM(p=3.0, learn_p=True)
         self.pool_2 = nn.AdaptiveAvgPool2d((2, 2))
-        self.pool_4_fine = nn.AdaptiveAvgPool2d((5, 5))
+
+        # part4 pooling: Avg + Max fusion
+        self.pool_4_fine_avg = nn.AdaptiveAvgPool2d((5, 5))
+        self.pool_4_fine_max = nn.AdaptiveMaxPool2d((5, 5))
 
         self.global_head = PMGHead(
             512, embed_dim, num_classes, num_subcenters, dropout=0.2
@@ -144,10 +158,18 @@ class ImageClassificationModel(nn.Module):
                 p.requires_grad = False
 
         for module in [
-            self.layer2, self.layer3, self.layer4,
-            self.proj_l3, self.proj_l4, self.fuse, self.proj_l3_fine,
+            self.layer2,
+            self.layer3,
+            self.layer4,
+            self.proj_l3,
+            self.proj_l4,
+            self.fuse,
+            self.proj_l3_fine,
             self.gem,
-            self.global_head, self.part2_head, self.part4_head, self.concat_head
+            self.global_head,
+            self.part2_head,
+            self.part4_head,
+            self.concat_head,
         ]:
             for p in module.parameters():
                 p.requires_grad = True
@@ -157,7 +179,8 @@ class ImageClassificationModel(nn.Module):
             for m in module.modules():
                 if isinstance(m, nn.Conv2d):
                     nn.init.kaiming_normal_(
-                        m.weight, mode="fan_out", nonlinearity="relu")
+                        m.weight, mode="fan_out", nonlinearity="relu"
+                    )
                 elif isinstance(m, nn.BatchNorm2d):
                     nn.init.ones_(m.weight)
                     nn.init.zeros_(m.bias)
@@ -170,21 +193,36 @@ class ImageClassificationModel(nn.Module):
     def get_parameter_groups(self, lr_base):
         head_params = []
         for module in [
-            self.proj_l3, self.proj_l4, self.fuse, self.proj_l3_fine,
+            self.proj_l3,
+            self.proj_l4,
+            self.fuse,
+            self.proj_l3_fine,
             self.gem,
-            self.global_head, self.part2_head, self.part4_head, self.concat_head
+            self.global_head,
+            self.part2_head,
+            self.part4_head,
+            self.concat_head,
         ]:
             head_params.extend(
                 [p for p in module.parameters() if p.requires_grad])
 
         return [
-            {"params": [p for p in self.layer2.parameters(
-            ) if p.requires_grad], "lr": lr_base * 0.1},
-            {"params": [p for p in self.layer3.parameters(
-            ) if p.requires_grad], "lr": lr_base * 0.5},
-            {"params": [p for p in self.layer4.parameters(
-            ) if p.requires_grad], "lr": lr_base * 1.0},
-            {"params": head_params, "lr": lr_base * 1.5},
+            {
+                "params": [p for p in self.layer2.parameters() if p.requires_grad],
+                "lr": lr_base * 0.1,
+            },
+            {
+                "params": [p for p in self.layer3.parameters() if p.requires_grad],
+                "lr": lr_base * 0.5,
+            },
+            {
+                "params": [p for p in self.layer4.parameters() if p.requires_grad],
+                "lr": lr_base * 1.0,
+            },
+            {
+                "params": head_params,
+                "lr": lr_base * 1.5,
+            },
         ]
 
     def forward_features(self, x):
@@ -198,7 +236,8 @@ class ImageClassificationModel(nn.Module):
         feat_l4_proj = self.proj_l4(feat_l4)
 
         feat_l3_proj = F.adaptive_avg_pool2d(
-            feat_l3_proj, feat_l4_proj.shape[-2:])
+            feat_l3_proj, feat_l4_proj.shape[-2:]
+        )
         fused_map = self.fuse(torch.cat([feat_l3_proj, feat_l4_proj], dim=1))
 
         return feat_l2, feat_l3, feat_l4, fused_map
@@ -206,21 +245,25 @@ class ImageClassificationModel(nn.Module):
     def forward_pmg(self, x, return_attn=False):
         _, feat_l3, _, fused_map = self.forward_features(x)
 
-        # Global + coarse branch from fused_map
+        # Global branch
         global_feat = self.gem(fused_map)
-        part2_feat = self.pool_2(fused_map).flatten(1)
-
-        # High-resolution fine branch from layer3
-        fine_map = self.proj_l3_fine(feat_l3)
-        part4_feat = self.pool_4_fine(fine_map).flatten(1)
-
         global_logits, global_embed, global_logits_all = self.global_head(
             global_feat)
+
+        # Coarse part branch
+        part2_feat = self.pool_2(fused_map).flatten(1)
         part2_logits, part2_embed, part2_logits_all = self.part2_head(
             part2_feat)
+
+        # High-resolution fine branch
+        fine_map = self.proj_l3_fine(feat_l3)
+        part4_avg = self.pool_4_fine_avg(fine_map)
+        part4_max = self.pool_4_fine_max(fine_map)
+        part4_feat = (part4_avg + part4_max).flatten(1)
         part4_logits, part4_embed, part4_logits_all = self.part4_head(
             part4_feat)
 
+        # Final concat branch
         concat_feat = torch.cat(
             [global_embed, part2_embed, part4_embed], dim=1)
         concat_logits, concat_embed, concat_logits_all = self.concat_head(
@@ -245,6 +288,7 @@ class ImageClassificationModel(nn.Module):
             "fused_map": fused_map,
             "fine_map": fine_map,
         }
+
         return outputs
 
     def prototype_diversity_loss(self, margin=0.2):
@@ -274,14 +318,15 @@ class ImageClassificationModel(nn.Module):
             count += 1
 
         if count == 0:
-            return torch.tensor(0.0, device=self.global_head.classifier.weight.device)
+            return torch.tensor(
+                0.0, device=self.global_head.classifier.weight.device
+            )
         return total_loss / count
 
     def get_saliency(self, x):
         _, feat_l3, _, fused_map = self.forward_features(x)
         fine_map = self.proj_l3_fine(feat_l3)
 
-        # align spatial size before fusion
         fused_map_up = F.interpolate(
             fused_map,
             size=fine_map.shape[-2:],
@@ -289,8 +334,10 @@ class ImageClassificationModel(nn.Module):
             align_corners=False,
         )
 
-        saliency = 0.5 * fused_map_up.pow(2).mean(dim=1, keepdim=True) + \
-            0.5 * fine_map.pow(2).mean(dim=1, keepdim=True)
+        saliency = (
+            0.5 * fused_map_up.pow(2).mean(dim=1, keepdim=True)
+            + 0.5 * fine_map.pow(2).mean(dim=1, keepdim=True)
+        )
 
         saliency = F.interpolate(
             saliency,
