@@ -120,7 +120,7 @@ class ImageClassificationModel(nn.Module):
 
         self.gem = GeM(p=3.0, learn_p=True)
         self.pool_2 = nn.AdaptiveAvgPool2d((2, 2))
-        self.pool_4_fine = nn.AdaptiveAvgPool2d((4, 4))
+        self.pool_4_fine = nn.AdaptiveAvgPool2d((5, 5))
 
         self.global_head = PMGHead(
             512, embed_dim, num_classes, num_subcenters, dropout=0.2
@@ -129,7 +129,7 @@ class ImageClassificationModel(nn.Module):
             512 * 4, embed_dim, num_classes, num_subcenters, dropout=0.2
         )
         self.part4_head = PMGHead(
-            256 * 16, embed_dim, num_classes, num_subcenters, dropout=0.2
+            256 * 25, embed_dim, num_classes, num_subcenters, dropout=0.2
         )
         self.concat_head = PMGHead(
             embed_dim * 3, embed_dim, num_classes, num_subcenters, dropout=0.3
