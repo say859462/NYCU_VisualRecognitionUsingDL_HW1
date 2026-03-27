@@ -101,7 +101,7 @@ def main():
     parser.add_argument("--num_samples_per_class", type=int, default=3)
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--save_dir", type=str,
-                        default="./Plot/Attention_Outputs/current_cls")
+                        default="./Plot/Attention_Outputs/current_cls_76th")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 

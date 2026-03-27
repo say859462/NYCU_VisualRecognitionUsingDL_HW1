@@ -31,7 +31,7 @@
   "pmg_stage3_part2_weight": 0.5,
   "pmg_stage3_part4_weight": 0.5,
   "pmg_stage3_concat_weight": 1.0,
-  "pmg_stage3_cls_weight": 1.0,
+  "pmg_stage3_cls_weight": 0.5,
 
   "cls_num_heads": 4,
   "cls_attn_dropout": 0.1,
