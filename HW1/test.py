@@ -10,7 +10,6 @@ from tqdm import tqdm
 
 from dataset import ImageDataset
 from model import ImageClassificationModel
-from train import _get_stage_weights
 
 
 def main():
@@ -59,12 +58,13 @@ def main():
     all_predictions = []
     print(f"🚀 Running Final Inference from: {model_path}")
 
-    stage_cfg = _get_stage_weights(
-        epoch=config.get("num_epochs", 30),
-        stage1_epochs=config.get("pmg_stage1_epochs", 4),
-        stage2_epochs=config.get("pmg_stage2_epochs", 4),
-        config=config,
-    )
+    stage_cfg = {
+        "global_weight": 1.0,
+        "part2_weight": 1.0,
+        "part4_weight": 1.0,
+        "concat_weight": 1.0,
+        "fusion_weight": 1.0,
+    }
 
     with torch.no_grad():
         for images, _ in tqdm(test_loader, desc="Testing"):

@@ -226,6 +226,33 @@ class ImageClassificationModel(nn.Module):
             {"params": head_params, "lr": lr_base * 1.5},
         ]
 
+    def get_fusion_only_parameter_groups(self, lr):
+        return [
+            {"params": [p for p in self.fusion_head.parameters()
+                        if p.requires_grad], "lr": lr}
+        ]
+
+    def freeze_for_fusion_refinement(self):
+        for p in self.parameters():
+            p.requires_grad = False
+
+        for p in self.fusion_head.parameters():
+            p.requires_grad = True
+
+        self.stem.eval()
+        self.layer1.eval()
+        self.layer2.eval()
+        self.layer3.eval()
+        self.layer4.eval()
+        self.proj_l3.eval()
+        self.proj_l4.eval()
+        self.fuse.eval()
+        self.global_head.eval()
+        self.part2_head.eval()
+        self.part4_head.eval()
+        self.concat_head.eval()
+        self.fusion_head.train()
+
     def forward_features(self, x):
         x = self.stem(x)
         x = self.layer1(x)

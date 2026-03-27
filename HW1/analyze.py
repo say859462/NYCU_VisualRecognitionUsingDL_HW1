@@ -10,7 +10,6 @@ from tqdm import tqdm
 
 from dataset import ImageDataset
 from model import ImageClassificationModel
-from train import _get_stage_weights
 
 
 def compute_accuracy(preds, labels):
@@ -25,7 +24,7 @@ def main():
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--save_dir", type=str,
-                        default="./Plot/Analysis_PMG_74th")
+                        default="./Plot/Analysis_PMG_74v3")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
@@ -67,12 +66,13 @@ def main():
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
-    stage_cfg = _get_stage_weights(
-        epoch=config.get("num_epochs", 30),
-        stage1_epochs=config.get("pmg_stage1_epochs", 4),
-        stage2_epochs=config.get("pmg_stage2_epochs", 4),
-        config=config,
-    )
+    stage_cfg = {
+        "global_weight": 1.0,
+        "part2_weight": 1.0,
+        "part4_weight": 1.0,
+        "concat_weight": 1.0,
+        "fusion_weight": 1.0,
+    }
 
     rows = []
     all_labels = []
@@ -125,7 +125,7 @@ def main():
             fusion_preds.extend(fusion_pred.cpu().tolist())
             all_labels.extend(labels.cpu().tolist())
 
-            top2_prob, top2_idx = torch.topk(fusion_prob, k=2, dim=1)
+            top2_prob, _ = torch.topk(fusion_prob, k=2, dim=1)
 
             for i in range(labels.size(0)):
                 y = labels[i].item()

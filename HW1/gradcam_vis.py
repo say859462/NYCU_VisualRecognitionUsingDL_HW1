@@ -71,7 +71,8 @@ def main():
     parser.add_argument('--val_dir', type=str, default='./Dataset/data/val')
     parser.add_argument('--num_samples_per_class', type=int, default=3)
     parser.add_argument('--model_path', type=str, default=None)
-    parser.add_argument('--save_dir', type=str, default='./Plot/Attention_Outputs/70th')
+    parser.add_argument('--save_dir', type=str,
+                        default='./Plot/Attention_Outputs/74th')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
 
@@ -131,24 +132,30 @@ def main():
         for img_path in sampled_image_paths:
             raw_img = Image.open(img_path).convert('RGB')
             cropped_img = preprocess_geo(raw_img)
-            input_tensor = preprocess_tensor(cropped_img).unsqueeze(0).to(device)
+            input_tensor = preprocess_tensor(
+                cropped_img).unsqueeze(0).to(device)
 
             with torch.no_grad():
                 outputs = model.forward_pmg(input_tensor)
 
-                global_probs = torch.softmax(outputs['global_logits'], dim=1)[0]
+                global_probs = torch.softmax(
+                    outputs['global_logits'], dim=1)[0]
                 part2_probs = torch.softmax(outputs['part2_logits'], dim=1)[0]
                 part4_probs = torch.softmax(outputs['part4_logits'], dim=1)[0]
-                concat_probs = torch.softmax(outputs['concat_logits'], dim=1)[0]
+                concat_probs = torch.softmax(
+                    outputs['concat_logits'], dim=1)[0]
 
                 # 原始 saliency
-                saliency = model.get_saliency(input_tensor)   # [B,H,W] or [B,1,H,W]
+                saliency = model.get_saliency(
+                    input_tensor)   # [B,H,W] or [B,1,H,W]
 
                 # 平滑版 heatmap
-                saliency_smooth = _smooth_heatmap(saliency, out_size=(448, 448))[0].cpu().numpy()
+                saliency_smooth = _smooth_heatmap(saliency, out_size=(448, 448))[
+                    0].cpu().numpy()
 
             rgb_img = np.float32(cropped_img) / 255.0
-            overlay = _overlay_heatmap_on_image(rgb_img, saliency_smooth, alpha=0.45)
+            overlay = _overlay_heatmap_on_image(
+                rgb_img, saliency_smooth, alpha=0.45)
 
             fig, axes = plt.subplots(1, 3, figsize=(15, 5))
             fig.suptitle(
