@@ -1,6 +1,7 @@
 import torch
 from tqdm import tqdm
-from train import _get_stage_weights, _compute_pmg_loss
+
+from train import _compute_pmg_loss, _get_stage_weights
 
 
 def _get_eval_logits(outputs, stage_cfg):
