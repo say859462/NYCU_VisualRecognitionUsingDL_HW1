@@ -79,7 +79,7 @@ def main():
     parser.add_argument("--num_samples_per_class", type=int, default=3)
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--save_dir", type=str,
-                        default="./Plot/Attention_Outputs/CrossAttention_89th")
+                        default="./Plot/Attention_Outputs/PurePMG_MixedPart4")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -179,7 +179,7 @@ def main():
             axes[2].axis("off")
             axes[2].set_title("Part4 Grad-CAM")
 
-            save_name = f"cross_attention_resize576_{os.path.splitext(os.path.basename(img_path))[0]}.png"
+            save_name = f"pure_pmg_mixed_part4_{os.path.splitext(os.path.basename(img_path))[0]}.png"
             plt.tight_layout()
             plt.savefig(os.path.join(class_save_dir, save_name),
                         bbox_inches="tight")

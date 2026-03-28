@@ -54,12 +54,12 @@ def build_attribution_tag(g_ok, p2_ok, p4_ok, c_ok):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Detailed PMG analysis for global-guided cross-attention fusion"
+        description="Detailed PMG analysis for Pure PMG + mixed fine source part4"
     )
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--save_dir", type=str,
-                        default="./Plot/Analysis_CrossAttention_Resize576_89th")
+                        default="./Plot/Analysis_PurePMG_MixedPart4_Resize576")
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--resize", type=int, default=576)
     args = parser.parse_args()
@@ -135,10 +135,6 @@ def main():
             concat_preds.extend(concat_pred.cpu().tolist())
             all_labels.extend(labels.cpu().tolist())
 
-            attn_weights = outputs["cross_attn_weights"]
-            mean_attn_entropy = float(
-                (-(attn_weights.clamp_min(1e-8) * attn_weights.clamp_min(1e-8).log()).sum(dim=-1).mean()).item())
-
             for i in range(labels.size(0)):
                 y = labels[i].item()
                 gp = global_pred[i].item()
@@ -174,7 +170,6 @@ def main():
                     "part2_top2_gap": safe_top2_gap(part2_prob[i]),
                     "part4_top2_gap": safe_top2_gap(part4_prob[i]),
                     "concat_top2_gap": safe_top2_gap(concat_prob[i]),
-                    "cross_attn_entropy_mean": mean_attn_entropy,
                     "all_wrong": int((not g_ok) and (not p2_ok) and (not p4_ok) and (not c_ok)),
                     "all_wrong_high_conf_08": int((not g_ok) and (not p2_ok) and (not p4_ok) and (not c_ok) and (c_conf >= 0.8)),
                     "all_wrong_high_conf_09": int((not g_ok) and (not p2_ok) and (not p4_ok) and (not c_ok) and (c_conf >= 0.9)),
@@ -208,13 +203,14 @@ def main():
         "mean_concat_error_top2_gap": float(concat_error_df["concat_top2_gap"].mean()) if len(concat_error_df) > 0 else 0.0,
         "high_conf_wrong_count_ge_0.9": int((concat_error_df["concat_conf"] >= 0.9).sum()),
         "high_conf_wrong_count_ge_0.8": int((concat_error_df["concat_conf"] >= 0.8).sum()),
-        "mean_cross_attn_entropy": float(df["cross_attn_entropy_mean"].mean()),
+        "mean_cross_attn_entropy": 0.0,
     }
 
     with open(os.path.join(args.save_dir, "analysis_summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
-    print(f"\n===== Cross-Attention Analysis Summary ({model_path}) =====")
+    print(
+        f"\n===== Pure PMG Mixed-Part4 Analysis Summary ({model_path}) =====")
     for k, v in summary.items():
         print(f"{k}: {v}")
 
