@@ -1,3 +1,4 @@
+
 import torch
 from tqdm import tqdm
 from train import _get_stage_weights, _compute_pmg_loss
@@ -14,8 +15,8 @@ def validate_one_epoch(model, val_loader, criterion, device, config, epoch):
 
     stage_cfg = _get_stage_weights(
         epoch=epoch,
-        stage1_epochs=config.get("pmg_stage1_epochs", 5),
-        stage2_epochs=config.get("pmg_stage2_epochs", 5),
+        stage1_epochs=config.get("pmg_stage1_epochs", 4),
+        stage2_epochs=config.get("pmg_stage2_epochs", 4),
         config=config,
     )
 

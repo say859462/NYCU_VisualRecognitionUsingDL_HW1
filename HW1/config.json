@@ -1,7 +1,7 @@
 {
-  "batch_size": 16,
+  "batch_size": 32,
   "num_epochs": 25,
-  "learning_rate": 6e-5,
+  "learning_rate": 8e-5,
   "num_classes": 100,
   "data_dir": "./Dataset/data",
   "checkpoint_path": "./Model_Weight/checkpoint.pth",
@@ -12,15 +12,14 @@
   "num_subcenters": 3,
   "embed_dim": 256,
   "proto_diversity_weight": 0.0,
-  "pmg_stage1_epochs": 5,
-  "pmg_stage2_epochs": 5,
+  "pmg_stage1_epochs": 4,
+  "pmg_stage2_epochs": 4,
   "pmg_stage1_global_weight": 1.0,
   "pmg_stage2_global_weight": 1.0,
   "pmg_stage2_part2_weight": 0.5,
-  "pmg_stage2_part4_weight": 0.0,
   "pmg_stage2_concat_weight": 0.5,
   "pmg_stage3_global_weight": 1.0,
   "pmg_stage3_part2_weight": 0.5,
-  "pmg_stage3_part4_weight": 0.3,
+  "pmg_stage3_part4_weight": 0.5,
   "pmg_stage3_concat_weight": 1.0
 }

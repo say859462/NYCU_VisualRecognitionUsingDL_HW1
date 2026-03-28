@@ -80,7 +80,7 @@ def main():
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--save_dir", type=str,
-                        default="./Plot/Analysis_Detailed_81th")
+                        default="./Plot/Analysis_PurePMG_83th")
     parser.add_argument("--num_workers", type=int, default=4)
     args = parser.parse_args()
 
