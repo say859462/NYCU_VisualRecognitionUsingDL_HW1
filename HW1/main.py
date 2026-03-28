@@ -2,6 +2,7 @@ from utils import (
     plot_training_curves,
     plot_per_class_error,
     plot_long_tail_accuracy,
+    PadToSquare,
 )
 from val import validate_one_epoch
 from train import train_one_epoch
@@ -81,13 +82,15 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(448, scale=(0.55, 1.0)),
+        PadToSquare(fill=(0, 0, 0)),
+        transforms.Resize((480, 480)),
+        transforms.RandomCrop(448),
         transforms.RandomHorizontalFlip(),
         transforms.RandomAffine(
-            degrees=15,
-            translate=(0.05, 0.05),
-            scale=(0.95, 1.05),
-            shear=5,
+            degrees=10,
+            translate=(0.03, 0.03),
+            scale=(0.97, 1.03),
+            shear=3,
         ),
         transforms.ColorJitter(
             brightness=0.12,
@@ -104,8 +107,8 @@ def main():
     ])
 
     val_transform = transforms.Compose([
-        transforms.Resize(512),
-        transforms.CenterCrop(448),
+        PadToSquare(fill=(0, 0, 0)),
+        transforms.Resize((448, 448)),
         transforms.ToTensor(),
         transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
@@ -223,7 +226,18 @@ def main():
                 f"global: {stage_cfg['global_weight']:.2f}, "
                 f"part2: {stage_cfg['part2_weight']:.2f}, "
                 f"part4: {stage_cfg['part4_weight']:.2f}, "
-                f"concat: {stage_cfg['concat_weight']:.2f}"
+                f"fusion: {stage_cfg['fusion_weight']:.2f}"
+            )
+
+            with torch.no_grad():
+                fusion_w = torch.softmax(
+                    model.logit_fusion.fusion_logits_param, dim=0).detach().cpu().numpy()
+
+            print(
+                f"Fusion weights -> "
+                f"global: {fusion_w[0]:.3f}, "
+                f"part2: {fusion_w[1]:.3f}, "
+                f"part4: {fusion_w[2]:.3f}"
             )
 
             print(

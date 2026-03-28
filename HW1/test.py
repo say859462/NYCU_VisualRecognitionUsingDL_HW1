@@ -6,10 +6,10 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from tqdm import tqdm
 
 from dataset import ImageDataset
 from model import ImageClassificationModel
+from utils import PadToSquare
 
 
 def main():
@@ -25,8 +25,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     test_transform = transforms.Compose([
-        transforms.Resize(512),
-        transforms.CenterCrop(448),
+        PadToSquare(fill=(0, 0, 0)),
+        transforms.Resize((448, 448)),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
@@ -58,10 +58,10 @@ def main():
     print(f"🚀 Running Final Inference from: {model_path}")
 
     with torch.no_grad():
-        for images, _ in tqdm(test_loader, desc="Testing"):
+        for images, _ in test_loader:
             images = images.to(device, non_blocking=True)
             outputs = model.forward_pmg(images)
-            preds = torch.argmax(outputs["concat_logits"], dim=1)
+            preds = torch.argmax(outputs["fusion_logits"], dim=1)
             all_predictions.extend(preds.cpu().tolist())
 
     image_names = [

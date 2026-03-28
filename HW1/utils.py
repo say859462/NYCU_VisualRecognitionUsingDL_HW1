@@ -11,6 +11,27 @@ from torch.utils.data.sampler import Sampler
 from collections import defaultdict
 import copy
 
+from PIL import Image
+from torchvision.transforms import functional as TF
+
+
+class PadToSquare:
+    def __init__(self, fill=(0, 0, 0)):
+        self.fill = fill
+
+    def __call__(self, img):
+        w, h = img.size
+        if w == h:
+            return img
+
+        max_side = max(w, h)
+        pad_left = (max_side - w) // 2
+        pad_right = max_side - w - pad_left
+        pad_top = (max_side - h) // 2
+        pad_bottom = max_side - h - pad_top
+
+        return TF.pad(img, [pad_left, pad_top, pad_right, pad_bottom], fill=self.fill)
+
 
 class CosFaceLoss(nn.Module):
     def __init__(self, margin=0.10):
