@@ -11,7 +11,7 @@
   "early_stopping_patience": 30,
 
   "backbone_name": "res2net101_26w_4s",
-  "num_subcenters": 1,
+  "num_subcenters": 3,
   "embed_dim": 256,
   "proto_diversity_weight": 0.0,
 
@@ -35,8 +35,8 @@
   "router_loss_weight": 0.0,
   "router_balance_weight": 0.0,
 
-  "curriculum_stage12_resize": 576,
-  "curriculum_stage12_crop": 512,
+  "curriculum_stage12_resize": 512,
+  "curriculum_stage12_crop": 448,
   "curriculum_stage3_resize": 576,
   "curriculum_stage3_crop": 512,
   "eval_resize": 576

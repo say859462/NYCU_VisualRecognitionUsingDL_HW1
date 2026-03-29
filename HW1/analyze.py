@@ -40,6 +40,8 @@ def build_per_class_stats(df: pd.DataFrame, num_classes: int):
                 "concat_acc": 0.0,
                 "mean_concat_conf": 0.0,
                 "mean_concat_top2_gap": 0.0,
+                "mean_fusion_attn_part2": 0.0,
+                "mean_fusion_attn_part4": 0.0,
             })
             continue
 
@@ -52,20 +54,22 @@ def build_per_class_stats(df: pd.DataFrame, num_classes: int):
             "concat_acc": float(class_df["concat_correct"].mean() * 100.0),
             "mean_concat_conf": float(class_df["concat_conf"].mean()),
             "mean_concat_top2_gap": float(class_df["concat_top2_gap"].mean()),
+            "mean_fusion_attn_part2": float(class_df["fusion_attn_part2"].mean()),
+            "mean_fusion_attn_part4": float(class_df["fusion_attn_part4"].mean()),
         })
     return pd.DataFrame(rows)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Detailed Pure PMG analysis for Res2Net Pure-PMG Realignment v1"
+        description="Detailed analysis for Res2Net PMG + lightweight cross-attention"
     )
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument(
         "--save_dir",
         type=str,
-        default="./Plot/Analysis_Res2Net_PurePMG_Realignment_v1",
+        default="./Plot/Analysis_Res2Net_LW_CrossAttention_96th",
     )
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--resize", type=int, default=576)
@@ -127,6 +131,9 @@ def main():
     part4_preds = []
     concat_preds = []
 
+    fusion_attn_part2_all = []
+    fusion_attn_part4_all = []
+
     with torch.no_grad():
         for images, labels in tqdm(val_loader, desc="Analyzing"):
             images = images.to(device, non_blocking=True)
@@ -149,11 +156,18 @@ def main():
             part4_pred = torch.argmax(part4_prob, dim=1)
             concat_pred = torch.argmax(concat_prob, dim=1)
 
+            fusion_attn = outputs["fusion_attn_weights"]   # [B, 2]
+            fusion_attn_part2 = fusion_attn[:, 0]
+            fusion_attn_part4 = fusion_attn[:, 1]
+
             global_preds.extend(global_pred.cpu().tolist())
             part2_preds.extend(part2_pred.cpu().tolist())
             part4_preds.extend(part4_pred.cpu().tolist())
             concat_preds.extend(concat_pred.cpu().tolist())
             all_labels.extend(labels.cpu().tolist())
+
+            fusion_attn_part2_all.extend(fusion_attn_part2.cpu().tolist())
+            fusion_attn_part4_all.extend(fusion_attn_part4.cpu().tolist())
 
             for i in range(labels.size(0)):
                 y = labels[i].item()
@@ -184,10 +198,14 @@ def main():
                     "part2_top2_gap": safe_top2_gap(part2_prob[i]),
                     "part4_top2_gap": safe_top2_gap(part4_prob[i]),
                     "concat_top2_gap": safe_top2_gap(concat_prob[i]),
+
+                    "fusion_attn_part2": float(fusion_attn_part2[i].item()),
+                    "fusion_attn_part4": float(fusion_attn_part4[i].item()),
                 })
 
     df = pd.DataFrame(rows)
-    detailed_csv_path = os.path.join(args.save_dir, "pmg_predictions_detailed.csv")
+    detailed_csv_path = os.path.join(
+        args.save_dir, "pmg_predictions_detailed.csv")
     df.to_csv(detailed_csv_path, index=False)
 
     concat_error_df = df[df["concat_correct"] == 0]
@@ -256,15 +274,12 @@ def main():
         "median_concat_error_top2_gap": float(concat_error_df["concat_top2_gap"].median())
         if len(concat_error_df) > 0 else 0.0,
 
-        "high_conf_wrong_count_ge_0.9": int(
-            (concat_error_df["concat_conf"] >= 0.9).sum()
-        ),
-        "high_conf_wrong_count_ge_0.8": int(
-            (concat_error_df["concat_conf"] >= 0.8).sum()
-        ),
-        "high_conf_wrong_count_ge_0.7": int(
-            (concat_error_df["concat_conf"] >= 0.7).sum()
-        ),
+        "high_conf_wrong_count_ge_0.9": int((concat_error_df["concat_conf"] >= 0.9).sum()),
+        "high_conf_wrong_count_ge_0.8": int((concat_error_df["concat_conf"] >= 0.8).sum()),
+        "high_conf_wrong_count_ge_0.7": int((concat_error_df["concat_conf"] >= 0.7).sum()),
+
+        "mean_fusion_attn_part2": float(df["fusion_attn_part2"].mean()),
+        "mean_fusion_attn_part4": float(df["fusion_attn_part4"].mean()),
     }
 
     summary_path = os.path.join(args.save_dir, "analysis_summary.json")
@@ -272,10 +287,12 @@ def main():
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
     per_class_df = build_per_class_stats(df, config["num_classes"])
-    per_class_csv_path = os.path.join(args.save_dir, "per_class_branch_stats.csv")
+    per_class_csv_path = os.path.join(
+        args.save_dir, "per_class_branch_stats.csv")
     per_class_df.to_csv(per_class_csv_path, index=False)
 
-    print(f"\n===== Pure PMG Analysis ({model_path}) =====")
+    print(
+        f"\n===== PMG + Lightweight Cross-Attention Analysis ({model_path}) =====")
     for key, value in summary.items():
         print(f"{key}: {value}")
 

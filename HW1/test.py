@@ -13,7 +13,8 @@ from model import ImageClassificationModel
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Final Inference for Res2Net Pure-PMG Realignment v1")
+        description="Final Inference for Res2Net PMG + lightweight cross-attention"
+    )
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--output_csv", type=str, default="prediction.csv")

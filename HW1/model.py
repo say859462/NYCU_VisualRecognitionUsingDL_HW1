@@ -87,6 +87,59 @@ class PMGHead(nn.Module):
         return logits, embed, logits_all
 
 
+class LightweightBranchCrossAttention(nn.Module):
+    """
+    global_embed 作 query
+    [part2_embed, part4_embed] 作 key/value
+    輕量 cross-attention，只更新 global branch 的決策表示
+    """
+
+    def __init__(self, embed_dim=256, num_heads=4, dropout=0.1, mlp_ratio=2.0):
+        super().__init__()
+        assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+
+        self.q_norm = nn.LayerNorm(embed_dim)
+        self.kv_norm = nn.LayerNorm(embed_dim)
+
+        self.attn = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+
+        self.attn_dropout = nn.Dropout(dropout)
+        self.ffn_norm = nn.LayerNorm(embed_dim)
+
+        hidden_dim = int(embed_dim * mlp_ratio)
+        self.ffn = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, embed_dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, global_embed, part2_embed, part4_embed):
+        q = self.q_norm(global_embed).unsqueeze(1)                 # [B, 1, D]
+        kv = torch.stack([part2_embed, part4_embed], dim=1)       # [B, 2, D]
+        kv = self.kv_norm(kv)
+
+        attn_out, attn_weights = self.attn(
+            query=q,
+            key=kv,
+            value=kv,
+            need_weights=True,
+            average_attn_weights=True,
+        )                                                         # attn_out: [B, 1, D]
+
+        refined = global_embed.unsqueeze(1) + self.attn_dropout(attn_out)
+        refined = refined + self.ffn(self.ffn_norm(refined))
+        refined = refined.squeeze(1)                              # [B, D]
+
+        return refined, attn_weights.squeeze(1)                   # [B, 2]
+
+
 class SampleConditionedLogitRouter(nn.Module):
     def __init__(self, num_classes, hidden_dim=256, dropout=0.1):
         super().__init__()
@@ -191,15 +244,18 @@ class SampleConditionedLogitRouter(nn.Module):
 
 class ImageClassificationModel(nn.Module):
     """
-    Res2Net Pure-PMG Realignment v1
+    Res2Net + PMG + Lightweight Cross-Attention Fusion
 
-    Core idea:
-    - global branch: layer4
-    - part2 branch: layer4
-    - part4 branch: layer3
-    - concat head: concat(global_embed, part2_embed, part4_embed)
+    branch design:
+    - global <- layer4
+    - part2  <- layer4
+    - part4  <- layer3
 
-    This avoids the previous design where all branches came from one fused map.
+    fusion design:
+    - global_embed as query
+    - [part2_embed, part4_embed] as key/value
+    - refined_global_embed = CrossAttention(global, [part2, part4])
+    - concat_input = [refined_global_embed, part2_embed, part4_embed]
     """
 
     def __init__(
@@ -238,7 +294,6 @@ class ImageClassificationModel(nn.Module):
         self.layer3 = backbone.layer3
         self.layer4 = backbone.layer4
 
-        # Res2Net-50/101 bottleneck stages:
         # layer3 -> 1024 channels
         # layer4 -> 2048 channels
         self.global_proj = nn.Sequential(
@@ -256,10 +311,6 @@ class ImageClassificationModel(nn.Module):
             nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
         )
-
-        # Kept only for optional compatibility / future visualization hooks.
-        # Not used as the main branch generator anymore.
-        self.fuse = nn.Identity()
 
         self.gem = GeM(p=3.0, learn_p=True)
         self.pool_2 = nn.AdaptiveAvgPool2d((2, 2))
@@ -287,6 +338,14 @@ class ImageClassificationModel(nn.Module):
             num_subcenters=num_subcenters,
             dropout=0.2,
         )
+
+        self.branch_cross_attn = LightweightBranchCrossAttention(
+            embed_dim=embed_dim,
+            num_heads=4,
+            dropout=0.1,
+            mlp_ratio=2.0,
+        )
+
         self.concat_head = PMGHead(
             in_dim=embed_dim * 3,
             embed_dim=embed_dim,
@@ -322,6 +381,7 @@ class ImageClassificationModel(nn.Module):
             self.global_head,
             self.part2_head,
             self.part4_head,
+            self.branch_cross_attn,
             self.concat_head,
         ]
         if self.logit_router is not None:
@@ -364,6 +424,7 @@ class ImageClassificationModel(nn.Module):
             self.global_head,
             self.part2_head,
             self.part4_head,
+            self.branch_cross_attn,
             self.concat_head,
         ]
         if self.logit_router is not None:
@@ -413,9 +474,9 @@ class ImageClassificationModel(nn.Module):
     def forward_features(self, x):
         feat_l3, feat_l4 = self.forward_backbone(x)
 
-        global_map = self.global_proj(feat_l4)   # [B, 512, H4, W4]
-        part2_map = self.part2_proj(feat_l4)     # [B, 512, H4, W4]
-        part4_map = self.part4_proj(feat_l3)     # [B, 512, H3, W3]
+        global_map = self.global_proj(feat_l4)
+        part2_map = self.part2_proj(feat_l4)
+        part4_map = self.part4_proj(feat_l3)
 
         return {
             "feat_l3": feat_l3,
@@ -429,13 +490,13 @@ class ImageClassificationModel(nn.Module):
         return self.gem(global_map)
 
     def _build_part2_feature(self, part2_map):
-        part2_grid = self.pool_2(part2_map)  # [B, 512, 2, 2]
+        part2_grid = self.pool_2(part2_map)
         return part2_grid.flatten(1)
 
     def _build_part4_feature(self, part4_map):
         part4_avg = self.pool_4_avg(part4_map)
         part4_max = self.pool_4_max(part4_map)
-        part4_grid = 0.5 * (part4_avg + part4_max)  # part4 AvgMax
+        part4_grid = 0.5 * (part4_avg + part4_max)
         return part4_grid.flatten(1)
 
     def forward_pmg(self, x):
@@ -452,8 +513,14 @@ class ImageClassificationModel(nn.Module):
         part4_logits, part4_embed, part4_logits_all = self.part4_head(
             part4_feat)
 
+        refined_global_embed, fusion_attn_weights = self.branch_cross_attn(
+            global_embed=global_embed,
+            part2_embed=part2_embed,
+            part4_embed=part4_embed,
+        )
+
         concat_input = torch.cat(
-            [global_embed, part2_embed, part4_embed],
+            [refined_global_embed, part2_embed, part4_embed],
             dim=1,
         )
         concat_logits, concat_embed, concat_logits_all = self.concat_head(
@@ -467,6 +534,7 @@ class ImageClassificationModel(nn.Module):
             "global_embed": global_embed,
             "part2_embed": part2_embed,
             "part4_embed": part4_embed,
+            "refined_global_embed": refined_global_embed,
             "concat_embed": concat_embed,
             "global_logits_all": global_logits_all,
             "part2_logits_all": part2_logits_all,
@@ -477,6 +545,8 @@ class ImageClassificationModel(nn.Module):
             "global_map": feats["global_map"],
             "part2_map": feats["part2_map"],
             "part4_map": feats["part4_map"],
+            # [B, 2] => [part2, part4]
+            "fusion_attn_weights": fusion_attn_weights,
         }
 
         if self.logit_router is not None:
@@ -499,7 +569,6 @@ class ImageClassificationModel(nn.Module):
         return outputs["concat_logits"]
 
     def prototype_diversity_loss(self):
-        # Kept for compatibility with existing train.py
         if self.logit_router is not None:
             device = next(self.parameters()).device
             return torch.zeros(1, device=device, dtype=torch.float32).squeeze(0)
