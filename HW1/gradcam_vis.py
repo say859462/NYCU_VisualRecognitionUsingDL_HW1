@@ -112,7 +112,7 @@ def main():
     parser.add_argument(
         "--save_dir",
         type=str,
-        default="./Plot/Attention_Outputs/ResNet152_PartialRes2Net_PMG_98th",
+        default="./Plot/Attention_Outputs/ResNet152_PartialRes2Net_PMG_99th",
     )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()

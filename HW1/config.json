@@ -1,6 +1,6 @@
 {
   "batch_size": 16,
-  "num_epochs": 25,
+  "num_epochs": 30,
   "learning_rate": 0.0001,
   "num_classes": 100,
   "data_dir": "./Dataset/data",
@@ -8,7 +8,7 @@
   "best_model_path": "./Model_Weight/best_model.pth",
   "best_loss_model_path": "./Model_Weight/best_loss_model.pth",
   "resume_training": false,
-  "early_stopping_patience": 25,
+  "early_stopping_patience": 30,
 
   "backbone_name": "resnet152_partial_res2net",
   "num_subcenters": 3,
@@ -26,7 +26,7 @@
 
   "pmg_stage3_global_weight": 0.5,
   "pmg_stage3_part2_weight": 0.3,
-  "pmg_stage3_part4_weight": 0.1,
+  "pmg_stage3_part4_weight": 0.2,
   "pmg_stage3_concat_weight": 1.0,
 
   "use_logit_router": false,

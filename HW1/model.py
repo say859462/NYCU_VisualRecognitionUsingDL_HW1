@@ -100,6 +100,7 @@ class Res2Adapter(nn.Module):
         assert scale >= 2, "scale must be >= 2"
         inner_channels = channels // bottleneck_ratio
         assert inner_channels % scale == 0, "inner_channels must be divisible by scale"
+
         self.scale = scale
         self.split_channels = inner_channels // scale
 
@@ -153,19 +154,123 @@ class Res2Adapter(nn.Module):
         return out
 
 
+class TinyFusionTransformer(nn.Module):
+    """
+    1-layer tiny transformer block for [CLS, global, part2, part4].
+    """
+
+    def __init__(self, embed_dim, num_heads=4, mlp_ratio=2.0, dropout=0.1):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.norm2 = nn.LayerNorm(embed_dim)
+
+        hidden_dim = int(embed_dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, embed_dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        attn_input = self.norm1(x)
+        attn_out, attn_weights = self.attn(
+            attn_input,
+            attn_input,
+            attn_input,
+            need_weights=True,
+            average_attn_weights=True,
+        )
+        x = x + attn_out
+        x = x + self.mlp(self.norm2(x))
+        return x, attn_weights
+
+
+class CLSFusionHead(nn.Module):
+    """
+    Final learned fusion head:
+    tokens = [CLS, global_embed, part2_embed, part4_embed]
+    1-layer tiny transformer
+    final logits come from CLS token only
+    """
+
+    def __init__(
+        self,
+        embed_dim,
+        num_classes,
+        num_subcenters=3,
+        num_heads=4,
+        dropout=0.1,
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, 4, embed_dim))
+        self.token_dropout = nn.Dropout(dropout)
+
+        self.fusion_block = TinyFusionTransformer(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            mlp_ratio=2.0,
+            dropout=dropout,
+        )
+        self.final_norm = nn.LayerNorm(embed_dim)
+
+        self.classifier = SubCenterClassifier(
+            in_features=embed_dim,
+            num_classes=num_classes,
+            num_subcenters=num_subcenters,
+            scale=16.0,
+            learn_scale=True,
+        )
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+    def forward(self, global_embed, part2_embed, part4_embed):
+        batch_size = global_embed.size(0)
+
+        cls_token = self.cls_token.expand(batch_size, -1, -1)
+        branch_tokens = torch.stack(
+            [global_embed, part2_embed, part4_embed],
+            dim=1,
+        )
+
+        tokens = torch.cat([cls_token, branch_tokens], dim=1)
+        tokens = self.token_dropout(tokens + self.pos_embed)
+
+        fused_tokens, attn_weights = self.fusion_block(tokens)
+        cls_embed = self.final_norm(fused_tokens[:, 0, :])
+
+        logits, logits_all = self.classifier(cls_embed)
+        return logits, cls_embed, logits_all, fused_tokens, attn_weights
+
+
 class ImageClassificationModel(nn.Module):
     """
-    ResNet152 + partial Res2Net bottleneck adapters
-    更符合 PMG 概念的分支設計：
+    ResNet152 + partial Res2Net bottleneck adapters + PMG + CLS fusion head
 
+    分支定義：
     - global <- layer4 (+ res2 adapter)
     - part2  <- layer3 (+ res2 adapter)
     - part4  <- layer2
 
-    PMG 風格：
-    - global: deepest semantic branch
-    - part2:  mid-level coarse local branch
-    - part4:  higher-resolution fine local branch
+    最終融合：
+    - 不再直接 concat [global_embed, part2_embed, part4_embed]
+    - 改為 [CLS, global, part2, part4] 四個 token
+    - 經過 1 層 tiny transformer fusion
+    - 取 CLS token 作為最終 fused representation
     """
 
     def __init__(
@@ -180,6 +285,9 @@ class ImageClassificationModel(nn.Module):
         backbone_name="resnet152_partial_res2net",
     ):
         super().__init__()
+
+        # 保留介面相容性
+        del router_hidden_dim, router_dropout
 
         self.backbone_name = backbone_name
         self.use_logit_router = use_logit_router
@@ -204,7 +312,7 @@ class ImageClassificationModel(nn.Module):
         self.layer3 = backbone.layer3   # 1024
         self.layer4 = backbone.layer4   # 2048
 
-        # partial Res2Net bottleneck enhancement
+        # partial Res2Net enhancement
         self.layer3_res2 = nn.Sequential(
             Res2Adapter(1024, scale=4, bottleneck_ratio=4),
             Res2Adapter(1024, scale=4, bottleneck_ratio=4),
@@ -213,7 +321,7 @@ class ImageClassificationModel(nn.Module):
             Res2Adapter(2048, scale=4, bottleneck_ratio=4),
         )
 
-        # PMG-like branch projections
+        # PMG branch projections
         self.global_proj = nn.Sequential(
             nn.Conv2d(2048, 512, kernel_size=1, bias=False),
             nn.BatchNorm2d(512),
@@ -235,6 +343,7 @@ class ImageClassificationModel(nn.Module):
         self.pool_4_avg = nn.AdaptiveAvgPool2d((4, 4))
         self.pool_4_max = nn.AdaptiveMaxPool2d((4, 4))
 
+        # branch heads
         self.global_head = PMGHead(
             in_dim=512,
             embed_dim=embed_dim,
@@ -243,26 +352,27 @@ class ImageClassificationModel(nn.Module):
             dropout=0.2,
         )
         self.part2_head = PMGHead(
-            in_dim=512 * 4,   # 2x2
+            in_dim=512 * 4,   # 2x2 pooled coarse feature
             embed_dim=embed_dim,
             num_classes=num_classes,
             num_subcenters=num_subcenters,
             dropout=0.2,
         )
         self.part4_head = PMGHead(
-            in_dim=256 * 16,  # 4x4
+            in_dim=256 * 16,  # 4x4 pooled fine feature
             embed_dim=embed_dim,
             num_classes=num_classes,
             num_subcenters=num_subcenters,
             dropout=0.2,
         )
 
-        self.concat_head = PMGHead(
-            in_dim=embed_dim * 3,
+        # final fusion head: CLS token instead of direct concat
+        self.concat_head = CLSFusionHead(
             embed_dim=embed_dim,
             num_classes=num_classes,
             num_subcenters=num_subcenters,
-            dropout=0.3,
+            num_heads=4,
+            dropout=0.1,
         )
 
         self._freeze_shallow_layers()
@@ -359,10 +469,10 @@ class ImageClassificationModel(nn.Module):
     def forward_backbone(self, x):
         x = self.stem(x)
         x = self.layer1(x)
-        feat_l2 = self.layer2(x)                 # 512
-        feat_l3 = self.layer3(feat_l2)           # 1024
+        feat_l2 = self.layer2(x)         # 512
+        feat_l3 = self.layer3(feat_l2)   # 1024
         feat_l3 = self.layer3_res2(feat_l3)
-        feat_l4 = self.layer4(feat_l3)           # 2048
+        feat_l4 = self.layer4(feat_l3)   # 2048
         feat_l4 = self.layer4_res2(feat_l4)
         return feat_l2, feat_l3, feat_l4
 
@@ -403,16 +513,20 @@ class ImageClassificationModel(nn.Module):
         part4_feat = self._build_part4_feature(feats["part4_map"])
 
         global_logits, global_embed, global_logits_all = self.global_head(
-            global_feat)
+            global_feat
+        )
         part2_logits, part2_embed, part2_logits_all = self.part2_head(
-            part2_feat)
+            part2_feat
+        )
         part4_logits, part4_embed, part4_logits_all = self.part4_head(
-            part4_feat)
+            part4_feat
+        )
 
-        concat_input = torch.cat(
-            [global_embed, part2_embed, part4_embed], dim=1)
-        concat_logits, concat_embed, concat_logits_all = self.concat_head(
-            concat_input)
+        concat_logits, concat_embed, concat_logits_all, fusion_tokens, fusion_attn = self.concat_head(
+            global_embed,
+            part2_embed,
+            part4_embed,
+        )
 
         outputs = {
             "global_logits": global_logits,
@@ -436,6 +550,10 @@ class ImageClassificationModel(nn.Module):
             "global_map": feats["global_map"],
             "part2_map": feats["part2_map"],
             "part4_map": feats["part4_map"],
+
+            # optional analysis/debug
+            "fusion_tokens": fusion_tokens,
+            "fusion_attn": fusion_attn,
         }
         return outputs
 
