@@ -58,14 +58,14 @@ def build_per_class_stats(df: pd.DataFrame, num_classes: int):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Detailed Pure PMG analysis for Res2Net Pure-PMG Realignment v1"
+        description="Detailed PMG analysis for ResNet152 + partial Res2Net bottleneck"
     )
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument(
         "--save_dir",
         type=str,
-        default="./Plot/Analysis_Res2Net_PurePMG_Realignment_v1",
+        default="./Plot/Analysis_ResNet152_PartialRes2Net_PMG",
     )
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--resize", type=int, default=576)
@@ -112,7 +112,7 @@ def main():
         use_logit_router=config.get("use_logit_router", False),
         router_hidden_dim=config.get("router_hidden_dim", 256),
         router_dropout=config.get("router_dropout", 0.1),
-        backbone_name=config.get("backbone_name", "res2net50_26w_4s"),
+        backbone_name=config.get("backbone_name", "resnet152_partial_res2net"),
     ).to(device)
 
     state_dict = torch.load(model_path, map_location=device)
@@ -194,7 +194,7 @@ def main():
     concat_error_df = df[df["concat_correct"] == 0]
 
     summary = {
-        "backbone_name": config.get("backbone_name", "res2net50_26w_4s"),
+        "backbone_name": config.get("backbone_name", "resnet152_partial_res2net"),
         "resize": args.resize,
         "num_samples": len(all_labels),
 
@@ -277,7 +277,7 @@ def main():
         args.save_dir, "per_class_branch_stats.csv")
     per_class_df.to_csv(per_class_csv_path, index=False)
 
-    print(f"\n===== Pure PMG Analysis ({model_path}) =====")
+    print(f"\n===== PMG Analysis ({model_path}) =====")
     for key, value in summary.items():
         print(f"{key}: {value}")
 

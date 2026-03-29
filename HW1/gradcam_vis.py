@@ -112,7 +112,7 @@ def main():
     parser.add_argument(
         "--save_dir",
         type=str,
-        default="./Plot/Attention_Outputs/94th",
+        default="./Plot/Attention_Outputs/ResNet152_PartialRes2Net_PMG",
     )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -141,7 +141,7 @@ def main():
         use_logit_router=config.get("use_logit_router", False),
         router_hidden_dim=config.get("router_hidden_dim", 256),
         router_dropout=config.get("router_dropout", 0.1),
-        backbone_name=config.get("backbone_name", "res2net50_26w_4s"),
+        backbone_name=config.get("backbone_name", "resnet152_partial_res2net"),
     ).to(device)
 
     model.load_state_dict(torch.load(model_path, map_location=device))
@@ -188,8 +188,7 @@ def main():
             rgb_img = np.asarray(vis_img).astype(np.float32) / 255.0
 
             # Concat Grad-CAM:
-            # hook global_proj because concat contains global branch contribution,
-            # and this usually gives stable semantic localization on the high-level map.
+            # hook global_proj because concat includes the deepest semantic branch contribution.
             concat_cam, concat_pred, concat_probs, outputs = compute_gradcam(
                 model=model,
                 input_tensor=input_tensor.clone(),
@@ -198,7 +197,7 @@ def main():
             )
 
             # Part4 Grad-CAM:
-            # hook part4_proj because part4 branch is now generated from layer3.
+            # part4 branch now comes from layer2-derived feature map via part4_proj.
             part4_cam, part4_pred, part4_probs, _ = compute_gradcam(
                 model=model,
                 input_tensor=input_tensor.clone(),
@@ -253,10 +252,10 @@ def main():
 
             axes[2].imshow(part4_overlay)
             axes[2].axis("off")
-            axes[2].set_title("Part4 Grad-CAM (hook: part4_proj)")
+            axes[2].set_title("Part4 Grad-CAM (hook: part4_proj, from layer2)")
 
             save_name = (
-                f"res2net_pure_pmg_realignment_v1_"
+                f"resnet152_partial_res2net_pmg_"
                 f"{os.path.splitext(os.path.basename(img_path))[0]}.png"
             )
             plt.tight_layout()

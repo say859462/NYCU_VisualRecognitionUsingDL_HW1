@@ -13,7 +13,8 @@ from model import ImageClassificationModel
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Final Inference for Res2Net Pure-PMG Realignment v1")
+        description="Final Inference for ResNet152 + partial Res2Net bottleneck PMG"
+    )
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--output_csv", type=str, default="prediction.csv")
@@ -58,7 +59,7 @@ def main():
         use_logit_router=config.get("use_logit_router", False),
         router_hidden_dim=config.get("router_hidden_dim", 256),
         router_dropout=config.get("router_dropout", 0.1),
-        backbone_name=config.get("backbone_name", "res2net50_26w_4s"),
+        backbone_name=config.get("backbone_name", "resnet152_partial_res2net"),
     ).to(device)
 
     state_dict = torch.load(model_path, map_location=device)

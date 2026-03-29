@@ -24,13 +24,12 @@ def _get_stage_weights(epoch, stage1_epochs, stage2_epochs, config):
         }
 
     return {
-        "stage_name": "Stage 3 | Pure PMG + sample-conditioned logit router",
+        "stage_name": "Stage 3 | Pure PMG (ResNet152 + partial Res2Net bottleneck)",
         "global_weight": config.get("pmg_stage3_global_weight", 1.0),
         "part2_weight": config.get("pmg_stage3_part2_weight", 0.5),
         "part4_weight": config.get("pmg_stage3_part4_weight", 0.5),
         "concat_weight": config.get("pmg_stage3_concat_weight", 1.0),
-        "router_weight": config.get("router_loss_weight", 1.0)
-        if config.get("use_logit_router", True) else 0.0,
+        "router_weight": 0.0,
     }
 
 
