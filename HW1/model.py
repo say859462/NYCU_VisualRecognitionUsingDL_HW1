@@ -140,14 +140,20 @@ class PMGHead(nn.Module):
         embed = self.proj(x)
         logits, logits_all = self.classifier(embed)
         return logits, embed, logits_all
-
-
 class RawEvidenceFusionHead(nn.Module):
-    def __init__(self, embed_dim: int, num_classes: int, hidden_dim: int = 512, dropout: float = 0.20):
+    def __init__(
+        self,
+        embed_dim: int,
+        num_classes: int,
+        hidden_dim: int = 512,
+        dropout: float = 0.20,
+    ):
         super().__init__()
         stat_dim = 9
+        support_dim = 3
         interaction_dim = embed_dim * 6
-        in_dim = embed_dim * 3 + interaction_dim + num_classes * 3 + stat_dim
+        in_dim = embed_dim * 3 + interaction_dim + num_classes * 3 + stat_dim + support_dim
+
         self.fusion_mlp = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
@@ -192,39 +198,55 @@ class RawEvidenceFusionHead(nn.Module):
         agreement_gp2 = (g["pred"] == p2["pred"]).float().unsqueeze(1)
         agreement_gp4 = (g["pred"] == p4["pred"]).float().unsqueeze(1)
         agreement_p24 = (p2["pred"] == p4["pred"]).float().unsqueeze(1)
-        support_stats = torch.cat([
-            0.5 * (agreement_gp2 + agreement_gp4),
-            0.5 * (agreement_gp2 + agreement_p24),
-            0.5 * (agreement_gp4 + agreement_p24),
-        ], dim=1)
 
-        branch_stats = torch.cat([
-            g["top1"], g["gap"], g["entropy"],
-            p2["top1"], p2["gap"], p2["entropy"],
-            p4["top1"], p4["gap"], p4["entropy"],
-        ], dim=1)
+        support_stats = torch.cat(
+            [
+                agreement_gp2,
+                agreement_gp4,
+                agreement_p24,
+            ],
+            dim=1,
+        )
 
-        interaction_feat = torch.cat([
-            global_embed * part2_embed,
-            global_embed * part4_embed,
-            part2_embed * part4_embed,
-            torch.abs(global_embed - part2_embed),
-            torch.abs(global_embed - part4_embed),
-            torch.abs(part2_embed - part4_embed),
-        ], dim=1)
+        branch_stats = torch.cat(
+            [
+                g["top1"], g["gap"], g["entropy"],
+                p2["top1"], p2["gap"], p2["entropy"],
+                p4["top1"], p4["gap"], p4["entropy"],
+            ],
+            dim=1,
+        )
 
-        fusion_input = torch.cat([
-            global_embed,
-            part2_embed,
-            part4_embed,
-            interaction_feat,
-            global_logits,
-            part2_logits,
-            part4_logits,
-            branch_stats,
-        ], dim=1)
+        interaction_feat = torch.cat(
+            [
+                global_embed * part2_embed,
+                global_embed * part4_embed,
+                part2_embed * part4_embed,
+                torch.abs(global_embed - part2_embed),
+                torch.abs(global_embed - part4_embed),
+                torch.abs(part2_embed - part4_embed),
+            ],
+            dim=1,
+        )
+
+        fusion_input = torch.cat(
+            [
+                global_embed,
+                part2_embed,
+                part4_embed,
+                interaction_feat,
+                global_logits,
+                part2_logits,
+                part4_logits,
+                branch_stats,
+                support_stats,
+            ],
+            dim=1,
+        )
+
         hidden = self.fusion_mlp(fusion_input)
         final_logits = self.classifier(hidden)
+
         return final_logits, {
             "fusion_hidden": hidden,
             "global_prob": g["prob"],
@@ -236,7 +258,6 @@ class RawEvidenceFusionHead(nn.Module):
             "support_stats": support_stats,
             "fusion_input": fusion_input,
         }
-
 
 class ImageClassificationModel(nn.Module):
     def __init__(

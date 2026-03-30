@@ -1,3 +1,4 @@
+
 import argparse
 import json
 
@@ -10,9 +11,8 @@ from dataset import ImageDataset
 from model import ImageClassificationModel
 
 
-
 def main():
-    parser = argparse.ArgumentParser(description="Final inference for PMG residual fusion")
+    parser = argparse.ArgumentParser(description="Final inference for PMG consensus fusion")
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--output_csv", type=str, default="prediction.csv")
@@ -22,7 +22,8 @@ def main():
     with open(args.config, "r", encoding="utf-8") as file:
         config = json.load(file)
 
-    model_path = args.model_path if args.model_path is not None else config["best_model_path"]
+    default_model_path = config.get("best_concat_model_path", config["best_model_path"])
+    model_path = args.model_path if args.model_path is not None else default_model_path
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     eval_resize = config.get("eval_resize", 576)
 
@@ -68,6 +69,7 @@ def main():
     submission_df = pd.DataFrame({"image_name": image_names, "pred_label": all_predictions})
     submission_df.to_csv(args.output_csv, index=False)
     print(f"Submission CSV saved to: {args.output_csv}")
+    print(f"Model used: {model_path}")
 
 
 if __name__ == "__main__":

@@ -14,7 +14,6 @@ from tqdm import tqdm
 from model import ImageClassificationModel
 
 
-
 def _normalize_map(x: np.ndarray) -> np.ndarray:
     x = x.astype(np.float32)
     x = x - x.min()
@@ -22,13 +21,25 @@ def _normalize_map(x: np.ndarray) -> np.ndarray:
     return x
 
 
+def _resize_heatmap(heatmap: np.ndarray, out_hw) -> np.ndarray:
+    if heatmap.shape[:2] == out_hw:
+        return heatmap
+    heatmap_tensor = torch.from_numpy(heatmap).float().unsqueeze(0).unsqueeze(0)
+    heatmap_tensor = F.interpolate(
+        heatmap_tensor,
+        size=out_hw,
+        mode="bilinear",
+        align_corners=False,
+    )
+    return heatmap_tensor[0, 0].cpu().numpy()
+
 
 def _overlay_heatmap_on_image(rgb_img: np.ndarray, heatmap: np.ndarray, alpha: float = 0.45) -> np.ndarray:
+    heatmap = _resize_heatmap(_normalize_map(heatmap), rgb_img.shape[:2])
     cmap = plt.get_cmap("jet")
     heatmap_color = cmap(heatmap)[..., :3]
     overlay = (1.0 - alpha) * rgb_img + alpha * heatmap_color
     return np.clip(overlay, 0.0, 1.0)
-
 
 
 def compute_gradcam(model, input_tensor, target_module, target_logits_key):
@@ -72,6 +83,25 @@ def compute_gradcam(model, input_tensor, target_module, target_logits_key):
         handle_bwd.remove()
 
 
+def compute_concat_cam(model, input_tensor):
+    cams = []
+    pred_idx = None
+    probs = None
+    outputs = None
+
+    for target_module in [model.global_proj, model.part2_proj, model.part4_proj]:
+        cam, pred_idx, probs, outputs = compute_gradcam(
+            model=model,
+            input_tensor=input_tensor.clone(),
+            target_module=target_module,
+            target_logits_key="concat_logits",
+        )
+        cams.append(cam)
+
+    concat_cam = np.mean(np.stack(cams, axis=0), axis=0)
+    concat_cam = _normalize_map(concat_cam)
+    return concat_cam, pred_idx, probs, outputs
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -79,7 +109,7 @@ def main():
     parser.add_argument("--val_dir", type=str, default="./Dataset/data/val")
     parser.add_argument("--num_samples_per_class", type=int, default=2)
     parser.add_argument("--model_path", type=str, default=None)
-    parser.add_argument("--save_dir", type=str, default="./Plot/Attention_Outputs/ResidualFusion")
+    parser.add_argument("--save_dir", type=str, default="./Plot/Attention_Outputs/UniformJointFusion")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -93,7 +123,9 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.save_dir, exist_ok=True)
 
-    model_path = args.model_path if args.model_path is not None else config["best_model_path"]
+    default_model_path = config.get("best_concat_model_path", config["best_model_path"])
+    model_path = args.model_path if args.model_path is not None else default_model_path
+
     model = ImageClassificationModel(
         num_classes=config["num_classes"],
         pretrained=False,
@@ -101,12 +133,15 @@ def main():
         embed_dim=config.get("embed_dim", 256),
         backbone_name=config.get("backbone_name", "resnet152_partial_res2net"),
     ).to(device)
+
     state_dict = torch.load(model_path, map_location=device)
     model.load_state_dict(state_dict)
     model.eval()
 
     eval_resize = config.get("eval_resize", 576)
-    preprocess_geo = transforms.Compose([transforms.Resize((eval_resize, eval_resize))])
+    preprocess_geo = transforms.Compose([
+        transforms.Resize((eval_resize, eval_resize))
+    ])
     preprocess_tensor = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
@@ -129,23 +164,24 @@ def main():
             continue
 
         sampled_paths = random.sample(all_images, min(args.num_samples_per_class, len(all_images)))
+
         for img_path in sampled_paths:
             raw_img = Image.open(img_path).convert("RGB")
             vis_img = preprocess_geo(raw_img)
             input_tensor = preprocess_tensor(vis_img).unsqueeze(0).to(device)
             rgb_img = np.asarray(vis_img).astype(np.float32) / 255.0
 
-            global_cam, _, global_probs, outputs = compute_gradcam(
+            global_cam, global_pred, global_probs, outputs = compute_gradcam(
                 model=model,
                 input_tensor=input_tensor.clone(),
                 target_module=model.global_proj,
-                target_logits_key="concat_logits",
+                target_logits_key="global_logits",
             )
-            part2_cam, _, part2_probs, _ = compute_gradcam(
+            part2_cam, part2_pred, part2_probs, _ = compute_gradcam(
                 model=model,
                 input_tensor=input_tensor.clone(),
                 target_module=model.part2_proj,
-                target_logits_key="concat_logits",
+                target_logits_key="part2_logits",
             )
             part4_cam, part4_pred, part4_probs, _ = compute_gradcam(
                 model=model,
@@ -153,44 +189,49 @@ def main():
                 target_module=model.part4_proj,
                 target_logits_key="part4_logits",
             )
+            concat_cam, concat_pred, concat_probs, _ = compute_concat_cam(
+                model=model,
+                input_tensor=input_tensor.clone(),
+            )
 
             attention_map = outputs["attention_map"][0, 0].detach().cpu().numpy()
-            attention_map = _normalize_map(attention_map)
             attention_overlay = _overlay_heatmap_on_image(rgb_img, attention_map, alpha=0.45)
 
             fig, axes = plt.subplots(2, 3, figsize=(18, 10))
             axes = axes.flatten()
+
             axes[0].imshow(rgb_img)
             axes[0].set_title("Original")
+
             axes[1].imshow(_overlay_heatmap_on_image(rgb_img, global_cam, alpha=0.45))
-            axes[1].set_title(f"Global CAM -> {global_probs.argmax().item()}")
+            axes[1].set_title(f"Global CAM -> {global_pred} ({global_probs.max().item():.2f})")
+
             axes[2].imshow(_overlay_heatmap_on_image(rgb_img, part2_cam, alpha=0.45))
-            axes[2].set_title(f"Part2 CAM -> {part2_probs.argmax().item()}")
+            axes[2].set_title(f"Part2 CAM -> {part2_pred} ({part2_probs.max().item():.2f})")
+
             axes[3].imshow(_overlay_heatmap_on_image(rgb_img, part4_cam, alpha=0.45))
-            axes[3].set_title(f"Part4 CAM -> {part4_pred}")
+            axes[3].set_title(f"Part4 CAM -> {part4_pred} ({part4_probs.max().item():.2f})")
+
             axes[4].imshow(attention_overlay)
             axes[4].set_title("Attention Map")
-            axes[5].axis("off")
-            axes[5].text(
-                0.02,
-                0.98,
-                f"alpha_p2: {outputs['alpha_p2'][0].item():.3f}\nalpha_p4: {outputs['alpha_p4'][0].item():.3f}",
-                va="top",
-                fontsize=14,
-            )
 
-            for ax in axes[:5]:
+            axes[5].imshow(_overlay_heatmap_on_image(rgb_img, concat_cam, alpha=0.45))
+            axes[5].set_title(f"Concat CAM (avg branches) -> {concat_pred} ({concat_probs.max().item():.2f})")
+
+            for ax in axes:
                 ax.axis("off")
 
             summary = (
-                f"True: {class_id} | G:{global_probs.argmax().item()} ({global_probs.max().item():.2f}) | "
-                f"P2:{part2_probs.argmax().item()} ({part2_probs.max().item():.2f}) | "
-                f"P4:{part4_pred} ({part4_probs.max().item():.2f}) | "
-                f"Concat:{torch.argmax(torch.softmax(outputs['concat_logits'], dim=1), dim=1).item()}"
+                f"True: {class_id} | G:{global_pred} | P2:{part2_pred} | "
+                f"P4:{part4_pred} | Concat:{concat_pred}"
             )
             fig.suptitle(summary, fontsize=14, fontweight="bold")
             plt.tight_layout()
-            save_path = os.path.join(class_save_dir, f"{os.path.splitext(os.path.basename(img_path))[0]}_vis.png")
+
+            save_path = os.path.join(
+                class_save_dir,
+                f"{os.path.splitext(os.path.basename(img_path))[0]}_vis.png",
+            )
             plt.savefig(save_path, dpi=250)
             plt.close(fig)
 
