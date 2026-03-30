@@ -1,3 +1,5 @@
+"""Model definition """
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,7 +8,9 @@ from torchvision.models import ResNet152_Weights
 
 
 class GeM(nn.Module):
+    """Generalized mean pooling to emphasize high-response regions."""
     def __init__(self, p: float = 3.0, eps: float = 1e-6, learn_p: bool = True):
+        """Initialize GeM with an optional learnable exponent."""
         super().__init__()
         if learn_p:
             self.p = nn.Parameter(torch.ones(1) * p)
@@ -15,6 +19,7 @@ class GeM(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Pool a feature map into one vector per image."""
         p = torch.clamp(self.p, min=1.0)
         x = x.clamp(min=self.eps).pow(p)
         x = F.adaptive_avg_pool2d(x, 1).pow(1.0 / p)
@@ -22,6 +27,7 @@ class GeM(nn.Module):
 
 
 class Res2Adapter(nn.Module):
+    """Lightweight Res2Net-style residual adapter for multi-scale features."""
     def __init__(self, channels: int, scale: int = 4, bottleneck_ratio: int = 4):
         super().__init__()
         assert scale >= 2
@@ -80,6 +86,7 @@ class Res2Adapter(nn.Module):
 
 
 class SubCenterClassifier(nn.Module):
+    """Cosine classifier with multiple learnable prototypes per class."""
     def __init__(
         self,
         in_features: int,
@@ -101,6 +108,7 @@ class SubCenterClassifier(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
+        """Initialize class prototypes with a small Gaussian distribution."""
         nn.init.normal_(self.weight, mean=0.0, std=0.01)
 
     def forward(self, x: torch.Tensor):
@@ -113,6 +121,7 @@ class SubCenterClassifier(nn.Module):
 
 
 class PMGHead(nn.Module):
+    """Projection head used by each PMG branch."""
     def __init__(
         self,
         in_dim: int,
@@ -140,7 +149,10 @@ class PMGHead(nn.Module):
         embed = self.proj(x)
         logits, logits_all = self.classifier(embed)
         return logits, embed, logits_all
+
+
 class RawEvidenceFusionHead(nn.Module):
+    """Fuse branch embeddings, logits, and reliability cues into final logits."""
     def __init__(
         self,
         embed_dim: int,
@@ -168,6 +180,7 @@ class RawEvidenceFusionHead(nn.Module):
 
     @staticmethod
     def _branch_stats(logits: torch.Tensor):
+        """Extract confidence statistics from one branch output."""
         prob = torch.softmax(logits, dim=1)
         top2_prob, top2_idx = torch.topk(prob, k=2, dim=1)
         top1 = top2_prob[:, 0:1]
@@ -259,7 +272,9 @@ class RawEvidenceFusionHead(nn.Module):
             "fusion_input": fusion_input,
         }
 
+
 class ImageClassificationModel(nn.Module):
+    """ResNet-152 based PMG model with multi-branch fusion."""
     def __init__(
         self,
         num_classes: int = 100,
@@ -316,11 +331,13 @@ class ImageClassificationModel(nn.Module):
         self._init_new_layers()
 
     def _freeze_shallow_layers(self):
+        """Keep low-level pretrained filters fixed during fine-tuning."""
         for module in [self.stem, self.layer1]:
             for param in module.parameters():
                 param.requires_grad = False
 
     def _init_new_layers(self):
+        """Initialize newly added modules with Kaiming-style weights."""
         for module in [self.res2_layer3, self.res2_layer4, self.global_proj, self.part2_proj, self.part4_proj, self.concat_head]:
             for submodule in module.modules():
                 if isinstance(submodule, (nn.Conv2d, nn.Linear)):
@@ -332,11 +349,13 @@ class ImageClassificationModel(nn.Module):
                     nn.init.zeros_(submodule.bias)
 
     def check_parameters(self) -> bool:
+        """Check whether the model satisfies the course size constraint."""
         total = sum(param.numel() for param in self.parameters())
         print(f"Parameters: {total}")
         return total < 100_000_000
 
     def get_parameter_groups(self, lr_base: float):
+        """Return optimizer parameter groups with differential learning rates."""
         head_modules = [
             self.res2_layer3,
             self.res2_layer4,
@@ -360,6 +379,7 @@ class ImageClassificationModel(nn.Module):
         ]
 
     def forward_backbone(self, x: torch.Tensor):
+        """Run the ResNet backbone and return layer3 / layer4 features."""
         x = self.stem(x)
         x = self.layer1(x)
         x = self.layer2(x)
@@ -371,27 +391,33 @@ class ImageClassificationModel(nn.Module):
 
     @staticmethod
     def _normalize_map(x: torch.Tensor):
+        """Normalize a tensor map to the [0, 1] range."""
         x = x - x.amin(dim=(2, 3), keepdim=True)
         x = x / (x.amax(dim=(2, 3), keepdim=True) + 1e-8)
         return x
 
     def build_attention_map(self, global_map: torch.Tensor, part2_map: torch.Tensor):
+        """Build a simple attention map from global and part2 activations."""
         global_sal = self._normalize_map(global_map.mean(dim=1, keepdim=True))
         part2_sal = self._normalize_map(part2_map.mean(dim=1, keepdim=True))
         return self._normalize_map(0.5 * global_sal + 0.5 * part2_sal)
 
     def _build_global_feature(self, global_map: torch.Tensor):
+        """Create the global branch feature vector."""
         return self.gem(global_map)
 
     def _build_part2_feature(self, part2_map: torch.Tensor):
+        """Create the coarse 2x2 part feature representation."""
         part2_grid = self.pool_2(part2_map)
         return part2_grid.flatten(1), part2_grid
 
     def _build_part4_feature(self, part4_map: torch.Tensor):
+        """Create the finer 4x4 part feature representation."""
         part4_grid = 0.5 * (self.pool_4_avg(part4_map) + self.pool_4_max(part4_map))
         return part4_grid.flatten(1), part4_grid
 
     def forward_features(self, x: torch.Tensor):
+        """Build intermediate feature maps used by all PMG branches."""
         feat_l3, feat_l4 = self.forward_backbone(x)
         global_map = self.global_proj(feat_l4)
         part2_map = self.part2_proj(feat_l4)
@@ -407,6 +433,7 @@ class ImageClassificationModel(nn.Module):
         }
 
     def forward_pmg(self, x: torch.Tensor):
+        """Run the full PMG model and return branch-wise predictions."""
         feats = self.forward_features(x)
         global_feat = self._build_global_feature(feats["global_map"])
         part2_feat, part2_grid = self._build_part2_feature(feats["part2_map"])
