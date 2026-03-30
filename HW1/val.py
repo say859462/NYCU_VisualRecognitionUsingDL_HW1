@@ -1,3 +1,5 @@
+"""Validation loop for the PMG model."""
+
 import torch
 from tqdm import tqdm
 
@@ -5,6 +7,7 @@ from train import _compute_batch_acc, _compute_pmg_loss, _get_eval_logits, _get_
 
 
 def validate_one_epoch(model, val_loader, criterion, device, config, epoch):
+    """Evaluate the model for one epoch on the validation split."""
     model.eval()
     stage_cfg = _get_stage_weights(
         epoch=epoch,
@@ -42,13 +45,13 @@ def validate_one_epoch(model, val_loader, criterion, device, config, epoch):
             batch_concat_correct, _ = _compute_batch_acc(outputs["concat_logits"], labels)
             concat_correct += batch_concat_correct
 
-            all_preds.extend(preds.cpu().tolist())   # 這裡 preds 會是 global 的 preds
+            all_preds.extend(preds.cpu().tolist())  
             all_labels.extend(labels.cpu().tolist())
 
     return {
         "loss": running_loss / max(1, total),
-        "main_acc": (main_correct / max(1, total)) * 100,      # 現在代表 global_acc
-        "concat_acc": (concat_correct / max(1, total)) * 100,  # concat/final acc
+        "main_acc": (main_correct / max(1, total)) * 100,     
+        "concat_acc": (concat_correct / max(1, total)) * 100,  
         "preds": all_preds,
         "labels": all_labels,
     }
