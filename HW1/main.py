@@ -1,3 +1,5 @@
+"""Main training entry point """
+
 import argparse
 import json
 import math
@@ -21,6 +23,7 @@ cudnn.benchmark = True
 
 
 class WarmUpCosineAnnealingLR(torch.optim.lr_scheduler._LRScheduler):
+    """Cosine annealing scheduler with a short linear warm-up period."""
     def __init__(self, optimizer, T_max, warmup_epochs=5, eta_min=1e-6, last_epoch=-1):
         self.T_max = max(1, T_max)
         self.warmup_epochs = min(warmup_epochs, max(0, self.T_max - 1))
@@ -44,10 +47,12 @@ class WarmUpCosineAnnealingLR(torch.optim.lr_scheduler._LRScheduler):
 
 
 def build_optimizer(model, lr_base):
+    """Create the AdamW optimizer with grouped learning rates."""
     return optim.AdamW(model.get_parameter_groups(lr_base), weight_decay=5e-4)
 
 
 def get_train_geometry(epoch, config):
+    """Choose training resize and crop sizes for the current stage."""
     return {
         "resize": config.get("curriculum_stage12_resize", 512),
         "crop": config.get("curriculum_stage12_crop", 448),
@@ -56,6 +61,7 @@ def get_train_geometry(epoch, config):
 
 
 def build_train_transform(resize_size, crop_size):
+    """Build the stochastic training transform pipeline."""
     return transforms.Compose([
         transforms.Resize((resize_size, resize_size)),
         transforms.RandomCrop((crop_size, crop_size)),
@@ -72,6 +78,7 @@ def build_train_transform(resize_size, crop_size):
 
 
 def build_eval_transform(eval_resize):
+    """Build the deterministic evaluation transform pipeline."""
     return transforms.Compose([
         transforms.Resize((eval_resize, eval_resize)),
         transforms.ToTensor(),
@@ -80,6 +87,7 @@ def build_eval_transform(eval_resize):
 
 
 def build_loader(data_dir, split, batch_size, transform, num_workers=8, shuffle=False):
+    """Construct a DataLoader for one dataset split."""
     dataset = ImageDataset(root_dir=data_dir, split=split, transform=transform)
     loader = DataLoader(
         dataset,
@@ -108,6 +116,7 @@ def save_checkpoint(
     best_val_preds,
     best_val_labels,
 ):
+    """Save model, optimizer, scheduler, and training history."""
     torch.save(
         {
             "epoch": epoch_idx,
@@ -129,6 +138,7 @@ def save_checkpoint(
 
 
 def export_plots(config, history, best_val_preds, best_val_labels, data_dir):
+    """Save training curves and error-distribution figures."""
     if len(history["train_loss"]) > 0 and len(history["val_loss"]) > 0:
         plot_training_curves(
             history["train_loss"],
@@ -156,6 +166,7 @@ def export_plots(config, history, best_val_preds, best_val_labels, data_dir):
 
 
 def main():
+    """Train the model with progressive PMG supervision."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="./config.json")
     args = parser.parse_args()
