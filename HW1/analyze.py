@@ -24,38 +24,36 @@ def build_per_class_stats(df: pd.DataFrame, num_classes: int) -> pd.DataFrame:
     for class_id in range(num_classes):
         class_df = df[df["true_label"] == class_id]
         if len(class_df) == 0:
-            rows.append(
-                {
-                    "class_id": class_id,
-                    "num_samples": 0,
-                    "global_acc": 0.0,
-                    "part2_acc": 0.0,
-                    "part4_acc": 0.0,
-                    "concat_acc": 0.0,
-                }
-            )
-            continue
-
-        rows.append(
-            {
+            rows.append({
                 "class_id": class_id,
-                "num_samples": int(len(class_df)),
-                "global_acc": float(class_df["global_correct"].mean() * 100.0),
-                "part2_acc": float(class_df["part2_correct"].mean() * 100.0),
-                "part4_acc": float(class_df["part4_correct"].mean() * 100.0),
-                "concat_acc": float(class_df["concat_correct"].mean() * 100.0),
-                "mean_concat_conf": float(class_df["concat_conf"].mean()),
-                "mean_concat_top2_gap": float(class_df["concat_top2_gap"].mean()),
-            }
-        )
+                "num_samples": 0,
+                "global_acc": 0.0,
+                "part2_acc": 0.0,
+                "part4_acc": 0.0,
+                "concat_acc": 0.0,
+            })
+            continue
+        rows.append({
+            "class_id": class_id,
+            "num_samples": int(len(class_df)),
+            "global_acc": float(class_df["global_correct"].mean() * 100.0),
+            "part2_acc": float(class_df["part2_correct"].mean() * 100.0),
+            "part4_acc": float(class_df["part4_correct"].mean() * 100.0),
+            "concat_acc": float(class_df["concat_correct"].mean() * 100.0),
+            "mean_concat_conf": float(class_df["concat_conf"].mean()),
+            "mean_concat_top2_gap": float(class_df["concat_top2_gap"].mean()),
+            "mean_agreement_gp2": float(class_df["agreement_gp2"].mean()),
+            "mean_agreement_gp4": float(class_df["agreement_gp4"].mean()),
+            "mean_agreement_p24": float(class_df["agreement_p24"].mean()),
+        })
     return pd.DataFrame(rows)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Detailed PMG analysis for pairwise interaction fusion")
+    parser = argparse.ArgumentParser(description="Detailed PMG analysis for raw evidence fusion")
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
-    parser.add_argument("--save_dir", type=str, default="./Plot/Analysis_PairwiseFusion")
+    parser.add_argument("--save_dir", type=str, default="./Plot/Analysis_RawEvidenceFusion")
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--resize", type=int, default=576)
     args = parser.parse_args()
@@ -115,65 +113,59 @@ def main():
                 p2 = part2_pred[idx].item()
                 p4 = part4_pred[idx].item()
                 cp = concat_pred[idx].item()
-
-                rows.append(
-                    {
-                        "true_label": y,
-                        "global_pred": gp,
-                        "part2_pred": p2,
-                        "part4_pred": p4,
-                        "concat_pred": cp,
-                        "global_correct": int(gp == y),
-                        "part2_correct": int(p2 == y),
-                        "part4_correct": int(p4 == y),
-                        "concat_correct": int(cp == y),
-                        "global_conf": float(global_prob[idx, gp].item()),
-                        "part2_conf": float(part2_prob[idx, p2].item()),
-                        "part4_conf": float(part4_prob[idx, p4].item()),
-                        "concat_conf": float(concat_prob[idx, cp].item()),
-                        "concat_top2_gap": safe_top2_gap(concat_prob[idx]),
-                        "attention_mean": float(outputs["attention_map"][idx].mean().item()),
-                        "attention_max": float(outputs["attention_map"][idx].max().item()),
-                    }
-                )
+                rows.append({
+                    "true_label": y,
+                    "global_pred": gp,
+                    "part2_pred": p2,
+                    "part4_pred": p4,
+                    "concat_pred": cp,
+                    "global_correct": int(gp == y),
+                    "part2_correct": int(p2 == y),
+                    "part4_correct": int(p4 == y),
+                    "concat_correct": int(cp == y),
+                    "global_conf": float(global_prob[idx, gp].item()),
+                    "part2_conf": float(part2_prob[idx, p2].item()),
+                    "part4_conf": float(part4_prob[idx, p4].item()),
+                    "concat_conf": float(concat_prob[idx, cp].item()),
+                    "concat_top2_gap": safe_top2_gap(concat_prob[idx]),
+                    "attention_mean": float(outputs["attention_map"][idx].mean().item()),
+                    "attention_max": float(outputs["attention_map"][idx].max().item()),
+                    "agreement_gp2": float(outputs["agreement_gp2"][idx].item()),
+                    "agreement_gp4": float(outputs["agreement_gp4"][idx].item()),
+                    "agreement_p24": float(outputs["agreement_p24"][idx].item()),
+                })
 
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(args.save_dir, "sample_level_analysis.csv"), index=False)
-
     per_class_df = build_per_class_stats(df, config["num_classes"])
     per_class_df.to_csv(os.path.join(args.save_dir, "per_class_analysis.csv"), index=False)
-
-    global_acc = float(df["global_correct"].mean() * 100.0)
-    part2_acc = float(df["part2_correct"].mean() * 100.0)
-    part4_acc = float(df["part4_correct"].mean() * 100.0)
-    concat_acc = float(df["concat_correct"].mean() * 100.0)
-
-    case_global_wrong_concat_right = int(((df["global_correct"] == 0) & (df["concat_correct"] == 1)).sum())
-    case_part2_wrong_concat_right = int(((df["part2_correct"] == 0) & (df["concat_correct"] == 1)).sum())
-    case_part4_wrong_concat_right = int(((df["part4_correct"] == 0) & (df["concat_correct"] == 1)).sum())
-    case_part2_right_concat_wrong = int(((df["part2_correct"] == 1) & (df["concat_correct"] == 0)).sum())
-    case_part4_right_concat_wrong = int(((df["part4_correct"] == 1) & (df["concat_correct"] == 0)).sum())
-    high_conf_wrong_count_ge_0_9 = int(((df["concat_correct"] == 0) & (df["concat_conf"] >= 0.9)).sum())
-    high_conf_wrong_count_ge_0_8 = int(((df["concat_correct"] == 0) & (df["concat_conf"] >= 0.8)).sum())
 
     print(f"===== PMG Analysis ({model_path}) =====")
     print(f"backbone_name: {config.get('backbone_name', 'resnet152_partial_res2net')}")
     print(f"resize: {args.resize}")
     print(f"num_samples: {len(df)}")
-    print(f"global_acc: {global_acc}")
-    print(f"part2_acc: {part2_acc}")
-    print(f"part4_acc: {part4_acc}")
-    print(f"concat_acc: {concat_acc}")
-    print(f"case_global_wrong_concat_right: {case_global_wrong_concat_right}")
-    print(f"case_part2_wrong_concat_right: {case_part2_wrong_concat_right}")
-    print(f"case_part4_wrong_concat_right: {case_part4_wrong_concat_right}")
-    print(f"case_part2_right_concat_wrong: {case_part2_right_concat_wrong}")
-    print(f"case_part4_right_concat_wrong: {case_part4_right_concat_wrong}")
+    for key in ["global_acc", "part2_acc", "part4_acc", "concat_acc"]:
+        if key == "global_acc":
+            val = float(df["global_correct"].mean() * 100.0)
+        elif key == "part2_acc":
+            val = float(df["part2_correct"].mean() * 100.0)
+        elif key == "part4_acc":
+            val = float(df["part4_correct"].mean() * 100.0)
+        else:
+            val = float(df["concat_correct"].mean() * 100.0)
+        print(f"{key}: {val}")
+    print(f"case_global_wrong_concat_right: {int(((df['global_correct'] == 0) & (df['concat_correct'] == 1)).sum())}")
+    print(f"case_part2_right_concat_wrong: {int(((df['part2_correct'] == 1) & (df['concat_correct'] == 0)).sum())}")
+    print(f"case_part4_right_concat_wrong: {int(((df['part4_correct'] == 1) & (df['concat_correct'] == 0)).sum())}")
+    print(f"case_any_branch_right_concat_wrong: {int((((df['global_correct'] == 1) | (df['part2_correct'] == 1) | (df['part4_correct'] == 1)) & (df['concat_correct'] == 0)).sum())}")
     print(f"mean_concat_error_conf: {df[df['concat_correct'] == 0]['concat_conf'].mean() if (df['concat_correct'] == 0).any() else 0.0}")
     print(f"median_concat_error_conf: {df[df['concat_correct'] == 0]['concat_conf'].median() if (df['concat_correct'] == 0).any() else 0.0}")
     print(f"mean_concat_error_top2_gap: {df[df['concat_correct'] == 0]['concat_top2_gap'].mean() if (df['concat_correct'] == 0).any() else 0.0}")
-    print(f"high_conf_wrong_count_ge_0.9: {high_conf_wrong_count_ge_0_9}")
-    print(f"high_conf_wrong_count_ge_0.8: {high_conf_wrong_count_ge_0_8}")
+    print(f"high_conf_wrong_count_ge_0.9: {int(((df['concat_correct'] == 0) & (df['concat_conf'] >= 0.9)).sum())}")
+    print(f"high_conf_wrong_count_ge_0.8: {int(((df['concat_correct'] == 0) & (df['concat_conf'] >= 0.8)).sum())}")
+    print(f"mean_agreement_gp2: {df['agreement_gp2'].mean()}")
+    print(f"mean_agreement_gp4: {df['agreement_gp4'].mean()}")
+    print(f"mean_agreement_p24: {df['agreement_p24'].mean()}")
 
 
 if __name__ == "__main__":

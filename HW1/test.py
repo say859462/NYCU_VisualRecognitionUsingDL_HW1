@@ -10,8 +10,9 @@ from dataset import ImageDataset
 from model import ImageClassificationModel
 
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Final inference for pairwise interaction fusion PMG")
+    parser = argparse.ArgumentParser(description="Final inference for PMG residual fusion")
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--output_csv", type=str, default="prediction.csv")

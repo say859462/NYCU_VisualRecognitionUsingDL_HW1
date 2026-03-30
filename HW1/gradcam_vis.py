@@ -12,7 +12,7 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from model import ImageClassificationModel
-from utils import build_attention_boxes
+
 
 
 def _normalize_map(x: np.ndarray) -> np.ndarray:
@@ -22,11 +22,13 @@ def _normalize_map(x: np.ndarray) -> np.ndarray:
     return x
 
 
+
 def _overlay_heatmap_on_image(rgb_img: np.ndarray, heatmap: np.ndarray, alpha: float = 0.45) -> np.ndarray:
     cmap = plt.get_cmap("jet")
     heatmap_color = cmap(heatmap)[..., :3]
     overlay = (1.0 - alpha) * rgb_img + alpha * heatmap_color
     return np.clip(overlay, 0.0, 1.0)
+
 
 
 def compute_gradcam(model, input_tensor, target_module, target_logits_key):
@@ -70,13 +72,14 @@ def compute_gradcam(model, input_tensor, target_module, target_logits_key):
         handle_bwd.remove()
 
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--val_dir", type=str, default="./Dataset/data/val")
     parser.add_argument("--num_samples_per_class", type=int, default=2)
     parser.add_argument("--model_path", type=str, default=None)
-    parser.add_argument("--save_dir", type=str, default="./Plot/Attention_Outputs/PairwiseFusion")
+    parser.add_argument("--save_dir", type=str, default="./Plot/Attention_Outputs/ResidualFusion")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -131,7 +134,6 @@ def main():
             vis_img = preprocess_geo(raw_img)
             input_tensor = preprocess_tensor(vis_img).unsqueeze(0).to(device)
             rgb_img = np.asarray(vis_img).astype(np.float32) / 255.0
-            h, w = rgb_img.shape[:2]
 
             global_cam, _, global_probs, outputs = compute_gradcam(
                 model=model,
@@ -156,16 +158,6 @@ def main():
             attention_map = _normalize_map(attention_map)
             attention_overlay = _overlay_heatmap_on_image(rgb_img, attention_map, alpha=0.45)
 
-            boxes = build_attention_boxes(
-                outputs["attention_map"].detach(),
-                threshold=float(config.get("local_crop_threshold", 0.50)),
-                padding_ratio=float(config.get("local_crop_padding_ratio", 0.18)),
-                min_crop_ratio=float(config.get("local_min_crop_ratio", 0.35)),
-                fallback_crop_ratio=float(config.get("local_fallback_crop_ratio", 0.55)),
-            )
-            y1, x1, y2, x2 = boxes[0]
-            bbox_img = rgb_img.copy()
-
             fig, axes = plt.subplots(2, 3, figsize=(18, 10))
             axes = axes.flatten()
             axes[0].imshow(rgb_img)
@@ -177,13 +169,17 @@ def main():
             axes[3].imshow(_overlay_heatmap_on_image(rgb_img, part4_cam, alpha=0.45))
             axes[3].set_title(f"Part4 CAM -> {part4_pred}")
             axes[4].imshow(attention_overlay)
-            axes[4].add_patch(plt.Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor="white", linewidth=2.0))
-            axes[4].set_title("Attention Map + Crop Box")
-            crop_patch = rgb_img[y1:y2, x1:x2]
-            axes[5].imshow(crop_patch)
-            axes[5].set_title("Attention Crop")
+            axes[4].set_title("Attention Map")
+            axes[5].axis("off")
+            axes[5].text(
+                0.02,
+                0.98,
+                f"alpha_p2: {outputs['alpha_p2'][0].item():.3f}\nalpha_p4: {outputs['alpha_p4'][0].item():.3f}",
+                va="top",
+                fontsize=14,
+            )
 
-            for ax in axes:
+            for ax in axes[:5]:
                 ax.axis("off")
 
             summary = (
