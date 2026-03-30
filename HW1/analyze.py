@@ -1,3 +1,5 @@
+"""Analysis utilities for branch-wise PMG evaluation."""
+
 import argparse
 import json
 import os
@@ -13,6 +15,7 @@ from model import ImageClassificationModel
 
 
 def safe_top2_gap(prob_row: torch.Tensor) -> float:
+    """Return the probability gap between top-1 and top-2 classes."""
     if prob_row.numel() < 2:
         return 0.0
     top2_prob, _ = torch.topk(prob_row, k=2, dim=0)
@@ -20,6 +23,7 @@ def safe_top2_gap(prob_row: torch.Tensor) -> float:
 
 
 def build_per_class_stats(df: pd.DataFrame, num_classes: int) -> pd.DataFrame:
+    """Aggregate per-class accuracy and confidence statistics."""
     rows = []
     for class_id in range(num_classes):
         class_df = df[df["true_label"] == class_id]
@@ -48,6 +52,7 @@ def build_per_class_stats(df: pd.DataFrame, num_classes: int) -> pd.DataFrame:
 
 
 def main():
+    """Run sample-level and per-class error analysis on the validation set."""
     parser = argparse.ArgumentParser(
         description="Detailed PMG analysis for uniform joint fusion")
     parser.add_argument("--config", type=str, default="./config.json")
