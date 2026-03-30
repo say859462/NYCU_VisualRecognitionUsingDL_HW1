@@ -1,3 +1,5 @@
+"""Test-time inference script for generating prediction.csv."""
+
 
 import argparse
 import json
@@ -12,6 +14,7 @@ from model import ImageClassificationModel
 
 
 def main():
+    """Load the trained model and export test predictions."""
     parser = argparse.ArgumentParser(description="Final inference for PMG consensus fusion")
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
