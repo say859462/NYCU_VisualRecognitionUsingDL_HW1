@@ -1,3 +1,5 @@
+"""Grad-CAM visualization script for PMG branches."""
+
 import argparse
 import json
 import os
@@ -15,6 +17,7 @@ from model import ImageClassificationModel
 
 
 def _normalize_map(x: np.ndarray) -> np.ndarray:
+    """Normalize a NumPy heatmap into the [0, 1] range."""
     x = x.astype(np.float32)
     x = x - x.min()
     x = x / (x.max() + 1e-8)
@@ -22,6 +25,7 @@ def _normalize_map(x: np.ndarray) -> np.ndarray:
 
 
 def _resize_heatmap(heatmap: np.ndarray, out_hw) -> np.ndarray:
+    """Resize a heatmap to the requested output height and width."""
     if heatmap.shape[:2] == out_hw:
         return heatmap
     heatmap_tensor = torch.from_numpy(heatmap).float().unsqueeze(0).unsqueeze(0)
@@ -35,6 +39,7 @@ def _resize_heatmap(heatmap: np.ndarray, out_hw) -> np.ndarray:
 
 
 def _overlay_heatmap_on_image(rgb_img: np.ndarray, heatmap: np.ndarray, alpha: float = 0.45) -> np.ndarray:
+    """Blend a heatmap with the original RGB image for visualization."""
     heatmap = _resize_heatmap(_normalize_map(heatmap), rgb_img.shape[:2])
     cmap = plt.get_cmap("jet")
     heatmap_color = cmap(heatmap)[..., :3]
@@ -43,6 +48,7 @@ def _overlay_heatmap_on_image(rgb_img: np.ndarray, heatmap: np.ndarray, alpha: f
 
 
 def compute_gradcam(model, input_tensor, target_module, target_logits_key):
+    """Compute a Grad-CAM map for one target module and logits key."""
     model.eval()
     activations = []
     gradients = []
@@ -84,6 +90,7 @@ def compute_gradcam(model, input_tensor, target_module, target_logits_key):
 
 
 def compute_concat_cam(model, input_tensor):
+    """Build a CAM-like visualization directly from the model attention map."""
     cams = []
     pred_idx = None
     probs = None
@@ -104,6 +111,7 @@ def compute_concat_cam(model, input_tensor):
 
 
 def main():
+    """Export branch-wise Grad-CAM figures for validation samples."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--val_dir", type=str, default="./Dataset/data/val")
