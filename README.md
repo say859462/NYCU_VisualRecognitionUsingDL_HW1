@@ -1,4 +1,4 @@
-# NYCU Computer Vision 2026 HW1
+# NYCU Vision Recognition using Deep Learning 2026 HW1
 
 - **Student ID:** 314551113  
 - **Name:** 劉哲良  
